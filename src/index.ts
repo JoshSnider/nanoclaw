@@ -17,6 +17,7 @@ import {
   ContainerOutput,
   runContainerAgent,
   writeGroupsSnapshot,
+  writeMemorySnapshot,
   writeTasksSnapshot,
 } from './container-runner.js';
 import {
@@ -28,11 +29,14 @@ import {
   getAllRegisteredGroups,
   getAllSessions,
   getAllTasks,
+  getConversationBySessionId,
   getMessagesSince,
   getNewMessages,
+  getRecentConversations,
   getRegisteredGroup,
   getRouterState,
   initDatabase,
+  insertConversationArchive,
   setRegisteredGroup,
   setRouterState,
   setSession,
@@ -51,7 +55,9 @@ import {
 } from './sender-allowlist.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
+import { cleanupWorktrees } from './worktree.js';
 import { logger } from './logger.js';
+import { DATA_DIR } from './config.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -245,6 +251,16 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
 
+  // Clean up worktrees: WIP-commit uncommitted changes, push, remove
+  cleanupWorktrees(group.folder).catch((err) =>
+    logger.error({ group: group.name, err }, 'Failed to cleanup worktrees'),
+  );
+
+  // Archive session transcript + notes to DB and shared/conversations/
+  processSessionArchive(group.folder, sessions[group.folder]).catch((err) =>
+    logger.error({ group: group.name, err }, 'Failed to archive session'),
+  );
+
   if (output === 'error' || hadError) {
     // If we already sent output to the user, don't roll back the cursor —
     // the user got their response and re-processing would send duplicates.
@@ -292,6 +308,10 @@ async function runAgent(
       next_run: t.next_run,
     })),
   );
+
+  // Update memory index snapshot for container to search
+  const conversations = getRecentConversations(200);
+  writeMemorySnapshot(group.folder, conversations);
 
   // Update available groups snapshot (main group only can see all groups)
   const availableGroups = getAvailableGroups();
@@ -346,6 +366,221 @@ async function runAgent(
   } catch (err) {
     logger.error({ group: group.name, err }, 'Agent error');
     return 'error';
+  }
+}
+
+interface ParsedMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+function parseTranscriptJsonl(content: string): ParsedMessage[] {
+  const messages: ParsedMessage[] = [];
+  for (const line of content.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      const entry = JSON.parse(line);
+      if (entry.type === 'user' && entry.message?.content) {
+        const text =
+          typeof entry.message.content === 'string'
+            ? entry.message.content
+            : entry.message.content
+                .map((c: { text?: string }) => c.text || '')
+                .join('');
+        if (text) messages.push({ role: 'user', content: text });
+      } else if (entry.type === 'assistant' && entry.message?.content) {
+        const textParts = entry.message.content
+          .filter((c: { type: string }) => c.type === 'text')
+          .map((c: { text: string }) => c.text);
+        const text = textParts.join('');
+        if (text) messages.push({ role: 'assistant', content: text });
+      }
+    } catch {
+      /* skip malformed lines */
+    }
+  }
+  return messages;
+}
+
+function formatTranscriptMarkdown(
+  messages: ParsedMessage[],
+  title?: string | null,
+): string {
+  const now = new Date();
+  const lines: string[] = [];
+  lines.push(`# ${title || 'Conversation'}`);
+  lines.push('');
+  lines.push(
+    `Archived: ${now.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true })}`,
+  );
+  lines.push('');
+  lines.push('---');
+  lines.push('');
+
+  for (const msg of messages) {
+    const sender = msg.role === 'user' ? 'User' : 'Assistant';
+    const content =
+      msg.content.length > 2000
+        ? msg.content.slice(0, 2000) + '...'
+        : msg.content;
+    lines.push(`**${sender}**: ${content}`);
+    lines.push('');
+  }
+
+  return lines.join('\n');
+}
+
+async function processSessionArchive(
+  groupFolder: string,
+  sessionId: string | undefined,
+): Promise<void> {
+  const groupDir = resolveGroupFolderPath(groupFolder);
+  const allMessages: ParsedMessage[] = [];
+
+  // 1. Read pre-compact transcripts from groups/{folder}/transcripts/
+  const transcriptsDir = path.join(groupDir, 'transcripts');
+  const transcriptFiles: string[] = [];
+  if (fs.existsSync(transcriptsDir)) {
+    const files = fs
+      .readdirSync(transcriptsDir)
+      .filter((f) => f.endsWith('.json'))
+      .sort();
+    for (const file of files) {
+      const filePath = path.join(transcriptsDir, file);
+      try {
+        const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+        if (data.messages && Array.isArray(data.messages)) {
+          allMessages.push(...data.messages);
+        }
+        transcriptFiles.push(filePath);
+      } catch (err) {
+        logger.warn(
+          { file, err },
+          'Failed to parse pre-compact transcript, skipping',
+        );
+      }
+    }
+  }
+
+  // 2. Read final JSONL transcript from session file
+  if (sessionId) {
+    // Check idempotency: skip if already archived for this session
+    const existing = getConversationBySessionId(sessionId);
+    if (existing) {
+      logger.debug(
+        { groupFolder, sessionId },
+        'Session already archived, cleaning up source files',
+      );
+      // Clean up source files even if already archived
+      for (const f of transcriptFiles) {
+        try {
+          fs.unlinkSync(f);
+        } catch {
+          /* ignore */
+        }
+      }
+      const notesFile = path.join(groupDir, 'session-notes.md');
+      try {
+        fs.unlinkSync(notesFile);
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
+
+    const sessionDir = path.join(
+      DATA_DIR,
+      'sessions',
+      groupFolder,
+      '.claude',
+      'projects',
+      '-workspace-group',
+    );
+    const jsonlPath = path.join(sessionDir, `${sessionId}.jsonl`);
+    if (fs.existsSync(jsonlPath)) {
+      const content = fs.readFileSync(jsonlPath, 'utf-8');
+      const finalMessages = parseTranscriptJsonl(content);
+      allMessages.push(...finalMessages);
+    }
+  }
+
+  if (allMessages.length === 0) {
+    // Nothing to archive — clean up empty transcript files
+    for (const f of transcriptFiles) {
+      try {
+        fs.unlinkSync(f);
+      } catch {
+        /* ignore */
+      }
+    }
+    return;
+  }
+
+  // 3. Read session notes
+  const notesFile = path.join(groupDir, 'session-notes.md');
+  let notes: string | null = null;
+  if (fs.existsSync(notesFile)) {
+    notes = fs.readFileSync(notesFile, 'utf-8');
+  }
+
+  // 4. Extract summary from first user message
+  const firstUserMsg = allMessages.find((m) => m.role === 'user');
+  const summary = firstUserMsg
+    ? firstUserMsg.content.slice(0, 200).replace(/\n/g, ' ')
+    : 'Conversation';
+
+  // 5. Deduplicate consecutive messages with same content
+  const deduped: ParsedMessage[] = [];
+  for (const msg of allMessages) {
+    const last = deduped[deduped.length - 1];
+    if (last && last.role === msg.role && last.content === msg.content) continue;
+    deduped.push(msg);
+  }
+
+  // 6. Format as markdown
+  const markdown = formatTranscriptMarkdown(deduped, summary);
+
+  // 7. Insert into DB
+  const archivedAt = new Date().toISOString();
+  const archiveId = insertConversationArchive({
+    session_id: sessionId ?? null,
+    group_folder: groupFolder,
+    summary,
+    transcript: markdown,
+    notes,
+    archived_at: archivedAt,
+    message_count: deduped.length,
+  });
+
+  // 8. Write markdown to shared/conversations/
+  const conversationsDir = path.join(process.cwd(), 'shared', 'conversations');
+  fs.mkdirSync(conversationsDir, { recursive: true });
+  fs.writeFileSync(path.join(conversationsDir, `${archiveId}.md`), markdown);
+
+  logger.info(
+    {
+      archiveId,
+      groupFolder,
+      sessionId,
+      messageCount: deduped.length,
+    },
+    'Session archived',
+  );
+
+  // 9. Delete processed source files (only after successful DB insert + file write)
+  for (const f of transcriptFiles) {
+    try {
+      fs.unlinkSync(f);
+    } catch {
+      /* ignore */
+    }
+  }
+  if (notes) {
+    try {
+      fs.unlinkSync(notesFile);
+    } catch {
+      /* ignore */
+    }
   }
 }
 
@@ -495,7 +730,11 @@ async function main(): Promise<void> {
       // Sender allowlist drop mode: discard messages from denied senders before storing
       // For thread JIDs (slack:CHANNEL:THREAD_TS), check against the parent channel JID
       const allowlistJid = chatJid.replace(/^(slack:[^:]+):.+$/, '$1');
-      if (!msg.is_from_me && !msg.is_bot_message && (registeredGroups[chatJid] || registeredGroups[allowlistJid])) {
+      if (
+        !msg.is_from_me &&
+        !msg.is_bot_message &&
+        (registeredGroups[chatJid] || registeredGroups[allowlistJid])
+      ) {
         const cfg = loadSenderAllowlist();
         if (
           shouldDropMessage(allowlistJid, cfg) &&

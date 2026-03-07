@@ -65,6 +65,31 @@ function createSchema(database: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_task_run_logs ON task_run_logs(task_id, run_at);
 
+    CREATE TABLE IF NOT EXISTS conversation_archives (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT,
+      group_folder TEXT NOT NULL,
+      summary TEXT NOT NULL DEFAULT '',
+      transcript TEXT NOT NULL,
+      notes TEXT,
+      archived_at TEXT NOT NULL,
+      message_count INTEGER DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_ca_date ON conversation_archives(archived_at);
+
+    CREATE VIRTUAL TABLE IF NOT EXISTS conversation_archives_fts USING fts5(
+      summary,
+      content='conversation_archives',
+      content_rowid='id',
+      tokenize='porter unicode61'
+    );
+
+    CREATE TRIGGER IF NOT EXISTS ca_fts_insert
+      AFTER INSERT ON conversation_archives BEGIN
+      INSERT INTO conversation_archives_fts(rowid, summary)
+      VALUES (new.id, new.summary);
+    END;
+
     CREATE TABLE IF NOT EXISTS router_state (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
@@ -632,6 +657,98 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
     };
   }
   return result;
+}
+
+// --- Conversation archive accessors ---
+
+export interface ConversationArchive {
+  id: number;
+  session_id: string | null;
+  group_folder: string;
+  summary: string;
+  transcript: string;
+  notes: string | null;
+  archived_at: string;
+  message_count: number;
+}
+
+export interface ConversationArchiveSummary {
+  id: number;
+  summary: string;
+  group_folder: string;
+  archived_at: string;
+  message_count: number;
+}
+
+export function insertConversationArchive(archive: {
+  session_id?: string | null;
+  group_folder: string;
+  summary: string;
+  transcript: string;
+  notes?: string | null;
+  archived_at: string;
+  message_count: number;
+}): number {
+  const result = db
+    .prepare(
+      `INSERT INTO conversation_archives (session_id, group_folder, summary, transcript, notes, archived_at, message_count)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      archive.session_id ?? null,
+      archive.group_folder,
+      archive.summary,
+      archive.transcript,
+      archive.notes ?? null,
+      archive.archived_at,
+      archive.message_count,
+    );
+  return Number(result.lastInsertRowid);
+}
+
+export function searchConversations(
+  query: string,
+  limit: number = 10,
+): ConversationArchiveSummary[] {
+  return db
+    .prepare(
+      `SELECT ca.id, ca.summary, ca.group_folder, ca.archived_at, ca.message_count
+     FROM conversation_archives_fts fts
+     JOIN conversation_archives ca ON ca.id = fts.rowid
+     WHERE fts.summary MATCH ?
+     ORDER BY ca.archived_at DESC
+     LIMIT ?`,
+    )
+    .all(query, limit) as ConversationArchiveSummary[];
+}
+
+export function getRecentConversations(
+  limit: number = 200,
+): ConversationArchiveSummary[] {
+  return db
+    .prepare(
+      `SELECT id, summary, group_folder, archived_at, message_count
+     FROM conversation_archives
+     ORDER BY archived_at DESC
+     LIMIT ?`,
+    )
+    .all(limit) as ConversationArchiveSummary[];
+}
+
+export function getConversationById(
+  id: number,
+): ConversationArchive | undefined {
+  return db
+    .prepare(`SELECT * FROM conversation_archives WHERE id = ?`)
+    .get(id) as ConversationArchive | undefined;
+}
+
+export function getConversationBySessionId(
+  sessionId: string,
+): ConversationArchive | undefined {
+  return db
+    .prepare(`SELECT * FROM conversation_archives WHERE session_id = ?`)
+    .get(sessionId) as ConversationArchive | undefined;
 }
 
 // --- JSON migration ---

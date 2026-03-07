@@ -11,7 +11,6 @@ import {
   CONTAINER_MAX_OUTPUT_SIZE,
   CONTAINER_TIMEOUT,
   DATA_DIR,
-  GROUPS_DIR,
   IDLE_TIMEOUT,
   TIMEZONE,
 } from './config.js';
@@ -23,7 +22,10 @@ import {
   readonlyMountArgs,
   stopContainer,
 } from './container-runtime.js';
-import { validateAdditionalMounts } from './mount-security.js';
+import {
+  loadMountAllowlist,
+  validateAdditionalMounts,
+} from './mount-security.js';
 import { isGitRepo, prepareRepoClone } from './repo-manager.js';
 import { RegisteredGroup } from './types.js';
 
@@ -99,17 +101,16 @@ async function buildVolumeMounts(
       containerPath: '/workspace/group',
       readonly: false,
     });
+  }
 
-    // Global memory directory (read-only for non-main)
-    // Only directory mounts are supported, not file mounts
-    const globalDir = path.join(GROUPS_DIR, 'global');
-    if (fs.existsSync(globalDir)) {
-      mounts.push({
-        hostPath: globalDir,
-        containerPath: '/workspace/global',
-        readonly: true,
-      });
-    }
+  // Shared agent instructions + archived conversations (read-only to prevent races)
+  const sharedDir = path.join(projectRoot, 'shared');
+  if (fs.existsSync(sharedDir)) {
+    mounts.push({
+      hostPath: sharedDir,
+      containerPath: '/workspace/shared',
+      readonly: true,
+    });
   }
 
   // Per-group Claude sessions directory (isolated from other groups)
@@ -251,6 +252,27 @@ async function buildVolumeMounts(
         isMain,
       );
       mounts.push(...validatedMounts);
+    }
+  }
+
+  // Auto-mount all git repos from the mount allowlist
+  const allowlist = loadMountAllowlist();
+  if (allowlist) {
+    for (const root of allowlist.allowedRoots) {
+      const rootPath = root.path.startsWith('~')
+        ? root.path.replace('~', process.env.HOME || '')
+        : root.path;
+      if (
+        isGitRepo(rootPath) &&
+        !mounts.some((m) => m.hostPath === rootPath)
+      ) {
+        const repoName = path.basename(rootPath);
+        mounts.push({
+          hostPath: rootPath,
+          containerPath: `/workspace/extra/${repoName}`,
+          readonly: !root.allowReadWrite,
+        });
+      }
     }
   }
 
@@ -722,6 +744,22 @@ export interface AvailableGroup {
  * Only main group can see all available groups (for activation).
  * Non-main groups only see their own registration status.
  */
+export function writeMemorySnapshot(
+  groupFolder: string,
+  conversations: {
+    id: number;
+    summary: string;
+    group_folder: string;
+    archived_at: string;
+    message_count: number;
+  }[],
+): void {
+  const groupIpcDir = resolveGroupIpcPath(groupFolder);
+  fs.mkdirSync(groupIpcDir, { recursive: true });
+  const indexFile = path.join(groupIpcDir, 'memory_index.json');
+  fs.writeFileSync(indexFile, JSON.stringify({ conversations }, null, 2));
+}
+
 export function writeGroupsSnapshot(
   groupFolder: string,
   isMain: boolean,

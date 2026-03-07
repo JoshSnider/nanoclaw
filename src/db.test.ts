@@ -6,9 +6,14 @@ import {
   deleteTask,
   getAllChats,
   getAllRegisteredGroups,
+  getConversationById,
+  getConversationBySessionId,
   getMessagesSince,
   getNewMessages,
+  getRecentConversations,
   getTaskById,
+  insertConversationArchive,
+  searchConversations,
   setRegisteredGroup,
   storeChatMetadata,
   storeMessage,
@@ -480,5 +485,141 @@ describe('registered group isMain', () => {
     const group = groups['group@g.us'];
     expect(group).toBeDefined();
     expect(group.isMain).toBeUndefined();
+  });
+});
+
+// --- Conversation archives ---
+
+describe('conversation archives', () => {
+  it('inserts and retrieves an archive by id', () => {
+    const id = insertConversationArchive({
+      session_id: 'session-abc',
+      group_folder: 'main',
+      summary: 'Discussed quarterly report',
+      transcript: '# Conversation\n\n**User**: Hello',
+      notes: 'Important meeting notes',
+      archived_at: '2026-03-06T10:00:00.000Z',
+      message_count: 5,
+    });
+
+    expect(id).toBeGreaterThan(0);
+
+    const archive = getConversationById(id);
+    expect(archive).toBeDefined();
+    expect(archive!.session_id).toBe('session-abc');
+    expect(archive!.group_folder).toBe('main');
+    expect(archive!.summary).toBe('Discussed quarterly report');
+    expect(archive!.transcript).toContain('Hello');
+    expect(archive!.notes).toBe('Important meeting notes');
+    expect(archive!.message_count).toBe(5);
+  });
+
+  it('retrieves archive by session id', () => {
+    insertConversationArchive({
+      session_id: 'session-xyz',
+      group_folder: 'main',
+      summary: 'Test session',
+      transcript: 'transcript content',
+      archived_at: '2026-03-06T10:00:00.000Z',
+      message_count: 3,
+    });
+
+    const archive = getConversationBySessionId('session-xyz');
+    expect(archive).toBeDefined();
+    expect(archive!.summary).toBe('Test session');
+  });
+
+  it('returns undefined for non-existent session id', () => {
+    const archive = getConversationBySessionId('nonexistent');
+    expect(archive).toBeUndefined();
+  });
+
+  it('returns recent conversations ordered by date', () => {
+    insertConversationArchive({
+      group_folder: 'main',
+      summary: 'Older conversation',
+      transcript: 'older',
+      archived_at: '2026-03-05T10:00:00.000Z',
+      message_count: 2,
+    });
+    insertConversationArchive({
+      group_folder: 'main',
+      summary: 'Newer conversation',
+      transcript: 'newer',
+      archived_at: '2026-03-06T10:00:00.000Z',
+      message_count: 4,
+    });
+
+    const recent = getRecentConversations(10);
+    expect(recent).toHaveLength(2);
+    expect(recent[0].summary).toBe('Newer conversation');
+    expect(recent[1].summary).toBe('Older conversation');
+  });
+
+  it('limits recent conversations', () => {
+    for (let i = 0; i < 5; i++) {
+      insertConversationArchive({
+        group_folder: 'main',
+        summary: `Conversation ${i}`,
+        transcript: `transcript ${i}`,
+        archived_at: `2026-03-0${i + 1}T10:00:00.000Z`,
+        message_count: i,
+      });
+    }
+
+    const recent = getRecentConversations(3);
+    expect(recent).toHaveLength(3);
+  });
+
+  it('searches conversations via FTS5', () => {
+    insertConversationArchive({
+      group_folder: 'main',
+      summary: 'Discussed quarterly financial report',
+      transcript: 'transcript 1',
+      archived_at: '2026-03-06T10:00:00.000Z',
+      message_count: 5,
+    });
+    insertConversationArchive({
+      group_folder: 'main',
+      summary: 'Set up new Slack channel',
+      transcript: 'transcript 2',
+      archived_at: '2026-03-06T11:00:00.000Z',
+      message_count: 3,
+    });
+
+    const results = searchConversations('quarterly report');
+    expect(results).toHaveLength(1);
+    expect(results[0].summary).toContain('quarterly');
+
+    const slackResults = searchConversations('Slack channel');
+    expect(slackResults).toHaveLength(1);
+    expect(slackResults[0].summary).toContain('Slack');
+  });
+
+  it('FTS5 search returns empty for no matches', () => {
+    insertConversationArchive({
+      group_folder: 'main',
+      summary: 'Hello world',
+      transcript: 'transcript',
+      archived_at: '2026-03-06T10:00:00.000Z',
+      message_count: 1,
+    });
+
+    const results = searchConversations('nonexistent keyword');
+    expect(results).toHaveLength(0);
+  });
+
+  it('handles null session_id and notes', () => {
+    const id = insertConversationArchive({
+      group_folder: 'main',
+      summary: 'No session',
+      transcript: 'transcript',
+      archived_at: '2026-03-06T10:00:00.000Z',
+      message_count: 1,
+    });
+
+    const archive = getConversationById(id);
+    expect(archive!.session_id).toBeNull();
+    expect(archive!.notes).toBeNull();
   });
 });

@@ -333,6 +333,85 @@ Use available_groups.json to find the JID for a group. The folder name must be c
   },
 );
 
+server.tool(
+  'search_memory',
+  'Search past conversations. Returns summaries for progressive disclosure. Use read_memory to get the full transcript of a specific conversation.',
+  {
+    query: z.string().describe('Search keywords'),
+    limit: z.number().optional().default(10),
+  },
+  async (args) => {
+    const indexFile = path.join(IPC_DIR, 'memory_index.json');
+    if (!fs.existsSync(indexFile)) {
+      return {
+        content: [{ type: 'text' as const, text: 'No conversation history yet.' }],
+      };
+    }
+    try {
+      const index = JSON.parse(fs.readFileSync(indexFile, 'utf-8'));
+      const queryLower = args.query.toLowerCase();
+      const results = (index.conversations || [])
+        .filter(
+          (c: { summary: string }) =>
+            c.summary.toLowerCase().includes(queryLower),
+        )
+        .slice(0, args.limit);
+
+      const text =
+        results.length === 0
+          ? `No conversations matching "${args.query}".`
+          : results
+              .map(
+                (c: {
+                  id: number;
+                  archived_at: string;
+                  summary: string;
+                  message_count: number;
+                }) =>
+                  `[${c.id}] ${c.archived_at.split('T')[0]} — ${c.summary} (${c.message_count} messages)`,
+              )
+              .join('\n');
+
+      return { content: [{ type: 'text' as const, text }] };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `Error reading memory index: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'read_memory',
+  'Read the full transcript of a past conversation by ID. Use search_memory first to find the ID.',
+  {
+    id: z.number().describe('Conversation archive ID from search_memory results'),
+  },
+  async (args) => {
+    const filePath = `/workspace/shared/conversations/${args.id}.md`;
+    if (!fs.existsSync(filePath)) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `Conversation ${args.id} not found. It may have been archived before this system was set up.`,
+          },
+        ],
+        isError: true,
+      };
+    }
+    return {
+      content: [{ type: 'text' as const, text: fs.readFileSync(filePath, 'utf-8') }],
+    };
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);

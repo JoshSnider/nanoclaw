@@ -16,6 +16,7 @@ Single Node.js process with skill-based channel system. Channels (WhatsApp, Tele
 | `src/router.ts` | Message formatting and outbound routing |
 | `src/config.ts` | Trigger pattern, paths, intervals |
 | `src/container-runner.ts` | Spawns agent containers with mounts |
+| `src/worktree.ts` | Git worktree lifecycle: create per-session, WIP commit on cleanup |
 | `src/task-scheduler.ts` | Runs scheduled tasks |
 | `src/db.ts` | SQLite operations |
 | `groups/{name}/CLAUDE.md` | Per-group memory (isolated) |
@@ -36,8 +37,14 @@ Single Node.js process with skill-based channel system. Channels (WhatsApp, Tele
 
 Run commands directly—don't tell the user to run them.
 
+**IMPORTANT:** After changing any TypeScript source, you MUST rebuild and restart the service for changes to take effect:
 ```bash
-npm run dev          # Run with hot reload
+npm run build && launchctl kickstart -k gui/$(id -u)/com.nanoclaw  # macOS
+npm run build && systemctl --user restart nanoclaw                  # Linux
+```
+
+```bash
+npm run dev          # Run with hot reload (dev only)
 npm run build        # Compile TypeScript
 ./container/build.sh # Rebuild agent container
 ```

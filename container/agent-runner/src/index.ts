@@ -58,6 +58,29 @@ interface SDKUserMessage {
 const IPC_INPUT_DIR = '/workspace/ipc/input';
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
+const SHARED_CLAUDE_MD = '/workspace/shared/CLAUDE.md';
+
+// Track mtime of shared CLAUDE.md for mid-session change detection
+let sharedClaudeMdMtime = 0;
+
+function initSharedClaudeMdMtime(): void {
+  try {
+    sharedClaudeMdMtime = fs.statSync(SHARED_CLAUDE_MD).mtimeMs;
+  } catch {
+    sharedClaudeMdMtime = 0;
+  }
+}
+
+function checkSharedClaudeMdChanged(): string | null {
+  try {
+    const mtime = fs.statSync(SHARED_CLAUDE_MD).mtimeMs;
+    if (mtime > sharedClaudeMdMtime) {
+      sharedClaudeMdMtime = mtime;
+      return fs.readFileSync(SHARED_CLAUDE_MD, 'utf-8');
+    }
+  } catch { /* file may not exist */ }
+  return null;
+}
 
 /**
  * Push-based async iterable for streaming user messages to the SDK.
@@ -141,9 +164,10 @@ function getSessionSummary(sessionId: string, transcriptPath: string): string | 
 }
 
 /**
- * Archive the full transcript to conversations/ before compaction.
+ * Save the full transcript locally before compaction.
+ * Writes JSON to /workspace/group/transcripts/ for the host to archive post-session.
  */
-function createPreCompactHook(assistantName?: string): HookCallback {
+function createPreCompactHook(): HookCallback {
   return async (input, _toolUseId, _context) => {
     const preCompact = input as PreCompactHookInput;
     const transcriptPath = preCompact.transcript_path;
@@ -163,22 +187,24 @@ function createPreCompactHook(assistantName?: string): HookCallback {
         return {};
       }
 
-      const summary = getSessionSummary(sessionId, transcriptPath);
-      const name = summary ? sanitizeFilename(summary) : generateFallbackName();
+      const transcriptsDir = '/workspace/group/transcripts';
+      fs.mkdirSync(transcriptsDir, { recursive: true });
 
-      const conversationsDir = '/workspace/group/conversations';
-      fs.mkdirSync(conversationsDir, { recursive: true });
+      const timestamp = Date.now();
+      const tempPath = path.join(transcriptsDir, `${timestamp}.json.tmp`);
+      const finalPath = path.join(transcriptsDir, `${timestamp}.json`);
 
-      const date = new Date().toISOString().split('T')[0];
-      const filename = `${date}-${name}.md`;
-      const filePath = path.join(conversationsDir, filename);
+      const data = JSON.stringify({
+        sessionId,
+        messages,
+        archivedAt: new Date().toISOString(),
+      });
+      fs.writeFileSync(tempPath, data);
+      fs.renameSync(tempPath, finalPath);
 
-      const markdown = formatTranscriptMarkdown(messages, summary, assistantName);
-      fs.writeFileSync(filePath, markdown);
-
-      log(`Archived conversation to ${filePath}`);
+      log(`Saved pre-compact transcript to ${finalPath} (${messages.length} messages)`);
     } catch (err) {
-      log(`Failed to archive transcript: ${err instanceof Error ? err.message : String(err)}`);
+      log(`Failed to save transcript: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     return {};
@@ -382,6 +408,15 @@ async function runQuery(
       log(`Piping IPC message into active query (${text.length} chars)`);
       stream.push(text);
     }
+    // Check if shared CLAUDE.md was updated mid-session
+    const updatedInstructions = checkSharedClaudeMdChanged();
+    if (updatedInstructions) {
+      log('Shared CLAUDE.md changed mid-session, injecting updated instructions');
+      stream.push(
+        `[SYSTEM: Your shared instructions file (shared/CLAUDE.md) has been updated. ` +
+        `Here are the updated instructions — please follow them from now on.]\n\n${updatedInstructions}`
+      );
+    }
     setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
   };
   setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
@@ -391,16 +426,12 @@ async function runQuery(
   let messageCount = 0;
   let resultCount = 0;
 
-  // Load global CLAUDE.md as additional system context (shared across all groups)
-  const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
-  let globalClaudeMd: string | undefined;
-  if (!containerInput.isMain && fs.existsSync(globalClaudeMdPath)) {
-    globalClaudeMd = fs.readFileSync(globalClaudeMdPath, 'utf-8');
-  }
-
-  // Discover additional directories mounted at /workspace/extra/*
+  // Discover additional directories mounted at /workspace/extra/* and /workspace/shared
   // These are passed to the SDK so their CLAUDE.md files are loaded automatically
   const extraDirs: string[] = [];
+  if (fs.existsSync('/workspace/shared')) {
+    extraDirs.push('/workspace/shared');
+  }
   const extraBase = '/workspace/extra';
   if (fs.existsSync(extraBase)) {
     for (const entry of fs.readdirSync(extraBase)) {
@@ -421,9 +452,7 @@ async function runQuery(
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
       resumeSessionAt: resumeAt,
-      systemPrompt: globalClaudeMd
-        ? { type: 'preset' as const, preset: 'claude_code' as const, append: globalClaudeMd }
-        : undefined,
+      systemPrompt: undefined,
       allowedTools: [
         'Bash',
         'Read', 'Write', 'Edit', 'Glob', 'Grep',
@@ -450,7 +479,7 @@ async function runQuery(
         },
       },
       hooks: {
-        PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],
+        PreCompact: [{ hooks: [createPreCompactHook()] }],
         PreToolUse: [{ matcher: 'Bash', hooks: [createSanitizeBashHook()] }],
       },
     }
@@ -520,6 +549,7 @@ async function main(): Promise<void> {
 
   let sessionId = containerInput.sessionId;
   fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
+  initSharedClaudeMdMtime();
 
   // Clean up stale _close sentinel from previous container runs
   try { fs.unlinkSync(IPC_INPUT_CLOSE_SENTINEL); } catch { /* ignore */ }

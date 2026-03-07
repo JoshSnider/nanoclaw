@@ -96,8 +96,7 @@ export class SlackChannel implements Channel {
       // Thread-based sessions: each thread is its own group/session.
       // - Top-level message (no thread_ts, or thread_ts === ts): starts a new thread session
       // - Reply in thread (thread_ts !== ts): routes to existing thread session
-      const threadTs =
-        (msg as GenericMessageEvent).thread_ts || msg.ts;
+      const threadTs = (msg as GenericMessageEvent).thread_ts || msg.ts;
       const threadJid = `slack:${msg.channel}:${threadTs}`;
 
       // Check if the parent channel is registered

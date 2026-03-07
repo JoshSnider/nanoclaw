@@ -13,7 +13,7 @@ vi.mock('./config.js', () => ({
   CONTAINER_TIMEOUT: 1800000, // 30min
   DATA_DIR: '/tmp/nanoclaw-test-data',
   GROUPS_DIR: '/tmp/nanoclaw-test-groups',
-  IDLE_TIMEOUT: 1800000, // 30min
+  IDLE_TIMEOUT: 900000, // 15min
   TIMEZONE: 'America/Los_Angeles',
 }));
 
@@ -48,6 +48,13 @@ vi.mock('fs', async () => {
 // Mock mount-security
 vi.mock('./mount-security.js', () => ({
   validateAdditionalMounts: vi.fn(() => []),
+  loadMountAllowlist: vi.fn(() => null),
+}));
+
+// Mock worktree
+vi.mock('./worktree.js', () => ({
+  createWorktrees: vi.fn(async () => new Map()),
+  isGitRepo: vi.fn(() => false),
 }));
 
 // Create a controllable fake ChildProcess
