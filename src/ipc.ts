@@ -5,9 +5,10 @@ import { CronExpressionParser } from 'cron-parser';
 
 import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { AvailableGroup } from './container-runner.js';
-import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
+import { activateSkill, createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
+import { processSkillRequest } from './mcp-registry.js';
 import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
@@ -22,6 +23,7 @@ export interface IpcDeps {
     availableGroups: AvailableGroup[],
     registeredJids: Set<string>,
   ) => void;
+  writeSkillIndexSnapshot: (groupFolder: string) => void;
 }
 
 let ipcWatcherRunning = false;
@@ -171,6 +173,12 @@ export async function processTaskIpc(
     trigger?: string;
     requiresTrigger?: boolean;
     containerConfig?: RegisteredGroup['containerConfig'];
+    // For activate_skill
+    skillName?: string;
+    // For skill_request
+    operation?: string;
+    params?: Record<string, unknown>;
+    requestId?: string;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -446,6 +454,41 @@ export async function processTaskIpc(
           { data },
           'Invalid register_group request - missing required fields',
         );
+      }
+      break;
+
+    case 'activate_skill':
+      if (data.skillName) {
+        activateSkill(sourceGroup, data.skillName);
+        // Refresh the skill index snapshot so future containers see the update
+        deps.writeSkillIndexSnapshot(sourceGroup);
+        logger.info(
+          { sourceGroup, skill: data.skillName },
+          'Skill activated via IPC',
+        );
+      } else {
+        logger.warn({ data }, 'activate_skill missing skillName');
+      }
+      break;
+
+    case 'skill_request':
+      if (
+        data.skillName &&
+        data.operation &&
+        data.requestId
+      ) {
+        // Fire-and-forget: response written to ipc/responses/{requestId}.json
+        processSkillRequest(
+          sourceGroup,
+          data.skillName,
+          data.operation,
+          data.params || {},
+          data.requestId,
+        ).catch((err) =>
+          logger.error({ sourceGroup, skill: data.skillName, err }, 'skill_request processing error'),
+        );
+      } else {
+        logger.warn({ data }, 'skill_request missing required fields');
       }
       break;
 

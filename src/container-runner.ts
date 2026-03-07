@@ -14,6 +14,7 @@ import {
   IDLE_TIMEOUT,
   TIMEZONE,
 } from './config.js';
+import { getActiveSkills } from './db.js';
 import { readEnvFile } from './env.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
@@ -169,6 +170,7 @@ async function buildVolumeMounts(
   fs.mkdirSync(path.join(groupIpcDir, 'messages'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'tasks'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'input'), { recursive: true });
+  fs.mkdirSync(path.join(groupIpcDir, 'responses'), { recursive: true });
   mounts.push({
     hostPath: groupIpcDir,
     containerPath: '/workspace/ipc',
@@ -729,6 +731,62 @@ export function writeTasksSnapshot(
 
   const tasksFile = path.join(groupIpcDir, 'current_tasks.json');
   fs.writeFileSync(tasksFile, JSON.stringify(filteredTasks, null, 2));
+}
+
+export interface SkillManifest {
+  name: string;
+  description: string;
+  operations: Array<{
+    name: string;
+    description: string;
+    params?: Record<string, { type: string; description?: string; optional?: boolean }>;
+  }>;
+}
+
+export interface SkillIndexEntry {
+  name: string;
+  description: string;
+  active: boolean;
+}
+
+/**
+ * Write the skill index snapshot for a group.
+ * Reads manifests from container/skills/{name}/manifest.json.
+ * Active skills (per DB) are flagged so the agent runner knows which
+ * skill MCP servers to start.
+ */
+export function writeSkillIndexSnapshot(groupFolder: string): void {
+  const groupIpcDir = resolveGroupIpcPath(groupFolder);
+  fs.mkdirSync(groupIpcDir, { recursive: true });
+
+  // Create the responses dir for skill request/response roundtrips
+  fs.mkdirSync(path.join(groupIpcDir, 'responses'), { recursive: true });
+
+  const skillsSrc = path.join(process.cwd(), 'container', 'skills');
+  const activeSkills = new Set(getActiveSkills(groupFolder));
+  const entries: SkillIndexEntry[] = [];
+
+  if (fs.existsSync(skillsSrc)) {
+    for (const skillDir of fs.readdirSync(skillsSrc)) {
+      const manifestPath = path.join(skillsSrc, skillDir, 'manifest.json');
+      if (!fs.existsSync(manifestPath)) continue;
+      try {
+        const manifest: SkillManifest = JSON.parse(
+          fs.readFileSync(manifestPath, 'utf-8'),
+        );
+        entries.push({
+          name: manifest.name,
+          description: manifest.description,
+          active: activeSkills.has(manifest.name),
+        });
+      } catch (err) {
+        logger.warn({ skillDir, err }, 'Failed to parse skill manifest');
+      }
+    }
+  }
+
+  const indexFile = path.join(groupIpcDir, 'skill_index.json');
+  fs.writeFileSync(indexFile, JSON.stringify(entries, null, 2));
 }
 
 export interface AvailableGroup {

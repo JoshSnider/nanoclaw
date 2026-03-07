@@ -107,6 +107,21 @@ function createSchema(database: Database.Database): void {
       container_config TEXT,
       requires_trigger INTEGER DEFAULT 1
     );
+
+    CREATE TABLE IF NOT EXISTS mcp_active_skills (
+      group_folder TEXT NOT NULL,
+      skill_name TEXT NOT NULL,
+      activated_at TEXT NOT NULL,
+      PRIMARY KEY (group_folder, skill_name)
+    );
+
+    CREATE TABLE IF NOT EXISTS mcp_credentials (
+      group_folder TEXT NOT NULL,
+      skill_name TEXT NOT NULL,
+      key TEXT NOT NULL,
+      value TEXT NOT NULL,
+      PRIMARY KEY (group_folder, skill_name, key)
+    );
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
@@ -749,6 +764,67 @@ export function getConversationBySessionId(
   return db
     .prepare(`SELECT * FROM conversation_archives WHERE session_id = ?`)
     .get(sessionId) as ConversationArchive | undefined;
+}
+
+// --- MCP skill accessors ---
+
+export function activateSkill(groupFolder: string, skillName: string): void {
+  db.prepare(
+    `INSERT OR REPLACE INTO mcp_active_skills (group_folder, skill_name, activated_at)
+     VALUES (?, ?, ?)`,
+  ).run(groupFolder, skillName, new Date().toISOString());
+}
+
+export function deactivateSkill(groupFolder: string, skillName: string): void {
+  db.prepare(
+    `DELETE FROM mcp_active_skills WHERE group_folder = ? AND skill_name = ?`,
+  ).run(groupFolder, skillName);
+}
+
+export function getActiveSkills(groupFolder: string): string[] {
+  const rows = db
+    .prepare(
+      `SELECT skill_name FROM mcp_active_skills WHERE group_folder = ? ORDER BY activated_at`,
+    )
+    .all(groupFolder) as Array<{ skill_name: string }>;
+  return rows.map((r) => r.skill_name);
+}
+
+export function setSkillCredential(
+  groupFolder: string,
+  skillName: string,
+  key: string,
+  value: string,
+): void {
+  db.prepare(
+    `INSERT OR REPLACE INTO mcp_credentials (group_folder, skill_name, key, value)
+     VALUES (?, ?, ?, ?)`,
+  ).run(groupFolder, skillName, key, value);
+}
+
+export function getSkillCredentials(
+  groupFolder: string,
+  skillName: string,
+): Record<string, string> {
+  const rows = db
+    .prepare(
+      `SELECT key, value FROM mcp_credentials WHERE group_folder = ? AND skill_name = ?`,
+    )
+    .all(groupFolder, skillName) as Array<{ key: string; value: string }>;
+  const result: Record<string, string> = {};
+  for (const row of rows) {
+    result[row.key] = row.value;
+  }
+  return result;
+}
+
+export function deleteSkillCredentials(
+  groupFolder: string,
+  skillName: string,
+): void {
+  db.prepare(
+    `DELETE FROM mcp_credentials WHERE group_folder = ? AND skill_name = ?`,
+  ).run(groupFolder, skillName);
 }
 
 // --- JSON migration ---

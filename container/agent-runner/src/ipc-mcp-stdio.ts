@@ -412,6 +412,118 @@ server.tool(
   },
 );
 
+const SKILLS_DIR = '/home/node/.claude/skills';
+const SKILL_INDEX_FILE = path.join(IPC_DIR, 'skill_index.json');
+
+server.tool(
+  'list_skills',
+  `List available skills. Skills extend your capabilities with service integrations (email, GitHub, etc.).
+Each skill exposes MCP tools that are activated when the skill is loaded.
+Use load_skill to activate a skill and see its full documentation.`,
+  {},
+  async () => {
+    try {
+      if (!fs.existsSync(SKILL_INDEX_FILE)) {
+        return {
+          content: [{ type: 'text' as const, text: 'No skills registered yet. Use /create-skill to add a new service integration.' }],
+        };
+      }
+
+      const skills = JSON.parse(fs.readFileSync(SKILL_INDEX_FILE, 'utf-8')) as Array<{
+        name: string;
+        description: string;
+        active: boolean;
+      }>;
+
+      if (skills.length === 0) {
+        return {
+          content: [{ type: 'text' as const, text: 'No skills registered yet. Use /create-skill to add a new service integration.' }],
+        };
+      }
+
+      const lines = skills.map(
+        (s) => `${s.active ? '✓' : '○'} **${s.name}** — ${s.description}${s.active ? ' (active)' : ''}`,
+      );
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: `Available skills (✓ = active, ○ = inactive):\n\n${lines.join('\n')}\n\nUse load_skill(name) to activate a skill and see its tools.`,
+        }],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `Error reading skill index: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'load_skill',
+  `Activate a skill and get its usage documentation.
+Once activated, the skill's MCP tools are available on the next message (tools are connected at container startup).
+If the skill is already active, this just returns the documentation.`,
+  {
+    name: z.string().describe('The skill name to load (from list_skills)'),
+  },
+  async (args) => {
+    const skillName = args.name.toLowerCase().replace(/[^a-z0-9-]/g, '-');
+    const skillDir = path.join(SKILLS_DIR, skillName);
+    const manifestPath = path.join(skillDir, 'manifest.json');
+    const skillMdPath = path.join(skillDir, 'SKILL.md');
+
+    if (!fs.existsSync(manifestPath)) {
+      return {
+        content: [{
+          type: 'text' as const,
+          text: `Skill "${skillName}" not found. Run list_skills to see available skills, or /create-skill to create a new one.`,
+        }],
+        isError: true,
+      };
+    }
+
+    // Check if already active
+    let isAlreadyActive = false;
+    try {
+      if (fs.existsSync(SKILL_INDEX_FILE)) {
+        const skills = JSON.parse(fs.readFileSync(SKILL_INDEX_FILE, 'utf-8')) as Array<{
+          name: string;
+          active: boolean;
+        }>;
+        isAlreadyActive = skills.some((s) => s.name === skillName && s.active);
+      }
+    } catch { /* ignore */ }
+
+    // Send activate_skill IPC to host (idempotent)
+    if (!isAlreadyActive) {
+      writeIpcFile(TASKS_DIR, {
+        type: 'activate_skill',
+        skillName,
+        groupFolder,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    // Return the SKILL.md docs
+    const skillDoc = fs.existsSync(skillMdPath)
+      ? fs.readFileSync(skillMdPath, 'utf-8')
+      : `# ${skillName}\n\nSkill activated. Check the manifest for available operations.`;
+
+    const status = isAlreadyActive
+      ? `✓ Skill "${skillName}" is already active — its MCP tools are ready.`
+      : `✓ Skill "${skillName}" activated. Its MCP tools (mcp__skills__${skillName}__*) will be connected on the next message.`;
+
+    return {
+      content: [{
+        type: 'text' as const,
+        text: `${status}\n\n---\n\n${skillDoc}`,
+      }],
+    };
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);
