@@ -533,7 +533,8 @@ async function processSessionArchive(
   const deduped: ParsedMessage[] = [];
   for (const msg of allMessages) {
     const last = deduped[deduped.length - 1];
-    if (last && last.role === msg.role && last.content === msg.content) continue;
+    if (last && last.role === msg.role && last.content === msg.content)
+      continue;
     deduped.push(msg);
   }
 

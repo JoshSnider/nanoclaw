@@ -244,7 +244,9 @@ async function buildVolumeMounts(
       }),
     );
 
-    const nonRepoMounts = resolvedMounts.filter((m): m is NonNullable<typeof m> => m !== null);
+    const nonRepoMounts = resolvedMounts.filter(
+      (m): m is NonNullable<typeof m> => m !== null,
+    );
     if (nonRepoMounts.length > 0) {
       const validatedMounts = validateAdditionalMounts(
         nonRepoMounts,
@@ -262,10 +264,7 @@ async function buildVolumeMounts(
       const rootPath = root.path.startsWith('~')
         ? root.path.replace('~', process.env.HOME || '')
         : root.path;
-      if (
-        isGitRepo(rootPath) &&
-        !mounts.some((m) => m.hostPath === rootPath)
-      ) {
+      if (isGitRepo(rootPath) && !mounts.some((m) => m.hostPath === rootPath)) {
         const repoName = path.basename(rootPath);
         mounts.push({
           hostPath: rootPath,
