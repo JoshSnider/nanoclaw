@@ -2,6 +2,8 @@ export interface AdditionalMount {
   hostPath: string; // Absolute path on host (supports ~ for home)
   containerPath?: string; // Optional — defaults to basename of hostPath. Mounted at /workspace/extra/{value}
   readonly?: boolean; // Default: true for safety
+  repo?: boolean; // If true (or auto-detected via .git), clone from origin and keep up-to-date
+  branch?: string; // Branch to track when repo=true. Default: 'main'
 }
 
 /**

@@ -24,6 +24,7 @@ import {
   stopContainer,
 } from './container-runtime.js';
 import { validateAdditionalMounts } from './mount-security.js';
+import { isGitRepo, prepareRepoClone } from './repo-manager.js';
 import { RegisteredGroup } from './types.js';
 
 // Sentinel markers for robust output parsing (must match agent-runner)
@@ -54,10 +55,10 @@ interface VolumeMount {
   readonly: boolean;
 }
 
-function buildVolumeMounts(
+async function buildVolumeMounts(
   group: RegisteredGroup,
   isMain: boolean,
-): VolumeMount[] {
+): Promise<VolumeMount[]> {
   const mounts: VolumeMount[] = [];
   const projectRoot = process.cwd();
   const groupDir = resolveGroupFolderPath(group.folder);
@@ -199,12 +200,58 @@ function buildVolumeMounts(
 
   // Additional mounts validated against external allowlist (tamper-proof from containers)
   if (group.containerConfig?.additionalMounts) {
-    const validatedMounts = validateAdditionalMounts(
-      group.containerConfig.additionalMounts,
-      group.name,
-      isMain,
+    // Resolve git repos/worktrees to self-contained local clones before
+    // validation. This replaces the hostPath with the clone path so
+    // containers get a proper .git directory that works without Mac paths.
+    const resolvedMounts = await Promise.all(
+      group.containerConfig.additionalMounts.map(async (mount) => {
+        const expandedPath = mount.hostPath.startsWith('~/')
+          ? path.join(process.env.HOME || '', mount.hostPath.slice(2))
+          : mount.hostPath;
+
+        const useRepo =
+          mount.repo === true ||
+          (mount.repo !== false && isGitRepo(expandedPath));
+
+        if (!useRepo) return mount;
+
+        const repoName = mount.containerPath || path.basename(expandedPath);
+        const branch = mount.branch || 'main';
+
+        try {
+          const clonePath = await prepareRepoClone(
+            expandedPath,
+            group.folder,
+            repoName,
+            branch,
+          );
+          // Clones are internal nanoclaw data — bypass allowlist validation
+          // by pushing the mount directly rather than going through validateAdditionalMounts.
+          mounts.push({
+            hostPath: clonePath,
+            containerPath: `/workspace/extra/${repoName}`,
+            readonly: false,
+          });
+          return null; // Signal: already handled
+        } catch (err) {
+          logger.error(
+            { group: group.name, hostPath: mount.hostPath, err },
+            'Failed to prepare repo clone — falling back to direct mount',
+          );
+          return mount;
+        }
+      }),
     );
-    mounts.push(...validatedMounts);
+
+    const nonRepoMounts = resolvedMounts.filter((m): m is NonNullable<typeof m> => m !== null);
+    if (nonRepoMounts.length > 0) {
+      const validatedMounts = validateAdditionalMounts(
+        nonRepoMounts,
+        group.name,
+        isMain,
+      );
+      mounts.push(...validatedMounts);
+    }
   }
 
   return mounts;
@@ -266,7 +313,7 @@ export async function runContainerAgent(
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
-  const mounts = buildVolumeMounts(group, input.isMain);
+  const mounts = await buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
   const containerArgs = buildContainerArgs(mounts, containerName);
