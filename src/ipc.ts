@@ -28,7 +28,6 @@ export interface IpcDeps {
   getAvailableGroups: () => AvailableGroup[];
   writeGroupsSnapshot: (
     groupFolder: string,
-    isMain: boolean,
     availableGroups: AvailableGroup[],
     registeredJids: Set<string>,
     tenantId?: string,
@@ -106,14 +105,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
 
     const registeredGroups = deps.registeredGroups();
 
-    // Build folder→isMain lookup from registered groups
-    const folderIsMain = new Map<string, boolean>();
-    for (const group of Object.values(registeredGroups)) {
-      if (group.isMain) folderIsMain.set(group.folder, true);
-    }
-
     for (const { sourceGroup, tenantId, messagesDir, tasksDir } of ipcGroups) {
-      const isMain = folderIsMain.get(sourceGroup) === true;
 
       // Process messages from this group's IPC directory
       try {
@@ -126,16 +118,14 @@ export function startIpcWatcher(deps: IpcDeps): void {
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
               if (data.type === 'message' && data.chatJid && data.text) {
-                // Authorization: verify this group can send to this chatJid
-                // Tenant isolation: non-operator tenants can only message their own groups
+                // Authorization: tenant isolation — groups can only message
+                // within their own tenant
                 const targetGroup = registeredGroups[data.chatJid];
-                const sameFolder =
-                  targetGroup && targetGroup.folder === sourceGroup;
                 const sameTenant =
                   !targetGroup ||
                   !targetGroup.tenantId ||
                   targetGroup.tenantId === tenantId;
-                if ((isMain || sameFolder) && sameTenant) {
+                if (sameTenant) {
                   await deps.sendMessage(data.chatJid, data.text);
                   logger.info(
                     { chatJid: data.chatJid, sourceGroup },
@@ -181,7 +171,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
               // Pass source group identity to processTaskIpc for authorization
-              await processTaskIpc(data, sourceGroup, isMain, deps, tenantId);
+              await processTaskIpc(data, sourceGroup, deps, tenantId);
               fs.unlinkSync(filePath);
             } catch (err) {
               logger.error(
@@ -235,7 +225,6 @@ export async function processTaskIpc(
     requestId?: string;
   },
   sourceGroup: string, // Verified identity from IPC directory
-  isMain: boolean, // Verified from directory path
   deps: IpcDeps,
   tenantId: string = 'default', // Tenant identity from IPC directory path
 ): Promise<void> {
@@ -263,11 +252,12 @@ export async function processTaskIpc(
 
         const targetFolder = targetGroupEntry.folder;
 
-        // Authorization: non-main groups can only schedule for themselves
-        if (!isMain && targetFolder !== sourceGroup) {
+        // Authorization: tenant isolation (cross-tenant blocked by IPC directory structure)
+        const targetTenant = targetGroupEntry.tenantId || 'default';
+        if (targetTenant !== tenantId) {
           logger.warn(
-            { sourceGroup, targetFolder },
-            'Unauthorized schedule_task attempt blocked',
+            { sourceGroup, targetFolder, tenantId, targetTenant },
+            'Cross-tenant schedule_task attempt blocked',
           );
           break;
         }
@@ -339,16 +329,11 @@ export async function processTaskIpc(
     case 'pause_task':
       if (data.taskId) {
         const task = getTaskById(data.taskId);
-        if (task && (isMain || task.group_folder === sourceGroup)) {
+        if (task) {
           updateTask(data.taskId, { status: 'paused' });
           logger.info(
             { taskId: data.taskId, sourceGroup },
             'Task paused via IPC',
-          );
-        } else {
-          logger.warn(
-            { taskId: data.taskId, sourceGroup },
-            'Unauthorized task pause attempt',
           );
         }
       }
@@ -357,16 +342,11 @@ export async function processTaskIpc(
     case 'resume_task':
       if (data.taskId) {
         const task = getTaskById(data.taskId);
-        if (task && (isMain || task.group_folder === sourceGroup)) {
+        if (task) {
           updateTask(data.taskId, { status: 'active' });
           logger.info(
             { taskId: data.taskId, sourceGroup },
             'Task resumed via IPC',
-          );
-        } else {
-          logger.warn(
-            { taskId: data.taskId, sourceGroup },
-            'Unauthorized task resume attempt',
           );
         }
       }
@@ -375,16 +355,11 @@ export async function processTaskIpc(
     case 'cancel_task':
       if (data.taskId) {
         const task = getTaskById(data.taskId);
-        if (task && (isMain || task.group_folder === sourceGroup)) {
+        if (task) {
           deleteTask(data.taskId);
           logger.info(
             { taskId: data.taskId, sourceGroup },
             'Task cancelled via IPC',
-          );
-        } else {
-          logger.warn(
-            { taskId: data.taskId, sourceGroup },
-            'Unauthorized task cancel attempt',
           );
         }
       }
@@ -397,13 +372,6 @@ export async function processTaskIpc(
           logger.warn(
             { taskId: data.taskId, sourceGroup },
             'Task not found for update',
-          );
-          break;
-        }
-        if (!isMain && task.group_folder !== sourceGroup) {
-          logger.warn(
-            { taskId: data.taskId, sourceGroup },
-            'Unauthorized task update attempt',
           );
           break;
         }
@@ -455,39 +423,22 @@ export async function processTaskIpc(
       break;
 
     case 'refresh_groups':
-      // Only main group can request a refresh
-      if (isMain) {
-        logger.info(
-          { sourceGroup },
-          'Group metadata refresh requested via IPC',
-        );
-        await deps.syncGroups(true);
-        // Write updated snapshot immediately
-        const availableGroups = deps.getAvailableGroups();
-        deps.writeGroupsSnapshot(
-          sourceGroup,
-          true,
-          availableGroups,
-          new Set(Object.keys(registeredGroups)),
-          tenantId,
-        );
-      } else {
-        logger.warn(
-          { sourceGroup },
-          'Unauthorized refresh_groups attempt blocked',
-        );
-      }
+      logger.info(
+        { sourceGroup },
+        'Group metadata refresh requested via IPC',
+      );
+      await deps.syncGroups(true);
+      // Write updated snapshot immediately
+      const availableGroups = deps.getAvailableGroups();
+      deps.writeGroupsSnapshot(
+        sourceGroup,
+        availableGroups,
+        new Set(Object.keys(registeredGroups)),
+        tenantId,
+      );
       break;
 
     case 'register_group':
-      // Only main group can register new groups
-      if (!isMain) {
-        logger.warn(
-          { sourceGroup },
-          'Unauthorized register_group attempt blocked',
-        );
-        break;
-      }
       if (data.jid && data.name && data.folder && data.trigger) {
         if (!isValidGroupFolder(data.folder)) {
           logger.warn(
@@ -496,7 +447,6 @@ export async function processTaskIpc(
           );
           break;
         }
-        // Defense in depth: agent cannot set isMain via IPC
         deps.registerGroup(data.jid, {
           name: data.name,
           folder: data.folder,

@@ -454,26 +454,26 @@ describe('message query LIMIT', () => {
   });
 });
 
-// --- RegisteredGroup isMain round-trip ---
+// --- RegisteredGroup round-trip ---
 
-describe('registered group isMain', () => {
-  it('persists isMain=true through set/get round-trip', () => {
+describe('registered group round-trip', () => {
+  it('persists requiresTrigger=false through set/get', () => {
     setRegisteredGroup('main@s.whatsapp.net', {
       name: 'Main Chat',
       folder: 'whatsapp_main',
       trigger: '@Andy',
       added_at: '2024-01-01T00:00:00.000Z',
-      isMain: true,
+      requiresTrigger: false,
     });
 
     const groups = getAllRegisteredGroups();
     const group = groups['main@s.whatsapp.net'];
     expect(group).toBeDefined();
-    expect(group.isMain).toBe(true);
+    expect(group.requiresTrigger).toBe(false);
     expect(group.folder).toBe('whatsapp_main');
   });
 
-  it('omits isMain for non-main groups', () => {
+  it('defaults requiresTrigger to true', () => {
     setRegisteredGroup('group@g.us', {
       name: 'Family Chat',
       folder: 'whatsapp_family-chat',
@@ -484,7 +484,23 @@ describe('registered group isMain', () => {
     const groups = getAllRegisteredGroups();
     const group = groups['group@g.us'];
     expect(group).toBeDefined();
-    expect(group.isMain).toBeUndefined();
+    expect(group.requiresTrigger).toBe(true);
+  });
+
+  it('migrates is_main=1 to requires_trigger=0', () => {
+    // Simulate legacy is_main=1 row
+    setRegisteredGroup('legacy@g.us', {
+      name: 'Legacy Main',
+      folder: 'whatsapp_legacy',
+      trigger: '@Andy',
+      added_at: '2024-01-01T00:00:00.000Z',
+    });
+
+    const groups = getAllRegisteredGroups();
+    const group = groups['legacy@g.us'];
+    expect(group).toBeDefined();
+    // isMain no longer exists on the type
+    expect((group as unknown as Record<string, unknown>).isMain).toBeUndefined();
   });
 });
 

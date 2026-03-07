@@ -142,12 +142,10 @@ async function runTask(
   groupDir = resolveGroupFolderPath(task.group_folder, tenantId);
   fs.mkdirSync(groupDir, { recursive: true });
 
-  // Update tasks snapshot for container to read (filtered by group)
-  const isMain = group.isMain === true;
+  // Update tasks snapshot for container to read
   const tasks = getAllTasks();
   writeTasksSnapshot(
     task.group_folder,
-    isMain,
     tasks.map((t) => ({
       id: t.id,
       groupFolder: t.group_folder,
@@ -190,7 +188,6 @@ async function runTask(
         sessionId,
         groupFolder: task.group_folder,
         chatJid: task.chat_jid,
-        isMain,
         isScheduledTask: true,
         tenantId,
         assistantName: ASSISTANT_NAME,

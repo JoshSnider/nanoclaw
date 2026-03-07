@@ -20,6 +20,5 @@
     "password",
     "secret",
     "token"
-  ],
-  "nonMainReadOnly": true
+  ]
 }

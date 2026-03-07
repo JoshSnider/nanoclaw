@@ -40,7 +40,6 @@ export interface ContainerInput {
   sessionId?: string;
   groupFolder: string;
   chatJid: string;
-  isMain: boolean;
   isScheduledTask?: boolean;
   assistantName?: string;
   tenantId?: string;
@@ -62,53 +61,19 @@ interface VolumeMount {
 
 async function buildVolumeMounts(
   group: RegisteredGroup,
-  isMain: boolean,
   tenantId?: string,
 ): Promise<VolumeMount[]> {
   const mounts: VolumeMount[] = [];
   const projectRoot = process.cwd();
-  const effectiveTenantId = tenantId || group.tenantId;
+  const effectiveTenantId = tenantId || group.tenantId || 'default';
   const groupDir = resolveGroupFolderPath(group.folder, effectiveTenantId);
 
-  // Only operator tenant's main group gets the project root mount
-  const isOperator = !effectiveTenantId || effectiveTenantId === 'default';
-  if (isMain && isOperator) {
-    // Main gets the project root read-only. Writable paths the agent needs
-    // (group folder, IPC, .claude/) are mounted separately below.
-    // Read-only prevents the agent from modifying host application code
-    // (src/, dist/, package.json, etc.) which would bypass the sandbox
-    // entirely on next restart.
-    mounts.push({
-      hostPath: projectRoot,
-      containerPath: '/workspace/project',
-      readonly: true,
-    });
-
-    // Shadow .env so the agent cannot read secrets from the mounted project root.
-    // Secrets are passed via stdin instead (see readSecrets()).
-    const envFile = path.join(projectRoot, '.env');
-    if (fs.existsSync(envFile)) {
-      mounts.push({
-        hostPath: '/dev/null',
-        containerPath: '/workspace/project/.env',
-        readonly: true,
-      });
-    }
-
-    // Main also gets its group folder as the working directory
-    mounts.push({
-      hostPath: groupDir,
-      containerPath: '/workspace/group',
-      readonly: false,
-    });
-  } else {
-    // Other groups only get their own folder
-    mounts.push({
-      hostPath: groupDir,
-      containerPath: '/workspace/group',
-      readonly: false,
-    });
-  }
+  // Every container gets its own group folder
+  mounts.push({
+    hostPath: groupDir,
+    containerPath: '/workspace/group',
+    readonly: false,
+  });
 
   // Shared agent instructions + archived conversations (read-only to prevent races)
   const sharedDir = path.join(projectRoot, 'shared');
@@ -259,26 +224,41 @@ async function buildVolumeMounts(
       const validatedMounts = validateAdditionalMounts(
         nonRepoMounts,
         group.name,
-        isMain,
       );
       mounts.push(...validatedMounts);
     }
   }
 
-  // Auto-mount all git repos from the mount allowlist
+  // Auto-mount git repos from the mount allowlist as per-group clones.
+  // Each group gets its own isolated clone so containers can't affect each
+  // other or the host's working tree. Pushes go through git remotes.
   const allowlist = loadMountAllowlist();
   if (allowlist) {
     for (const root of allowlist.allowedRoots) {
       const rootPath = root.path.startsWith('~')
         ? root.path.replace('~', process.env.HOME || '')
         : root.path;
-      if (isGitRepo(rootPath) && !mounts.some((m) => m.hostPath === rootPath)) {
-        const repoName = path.basename(rootPath);
+      if (!isGitRepo(rootPath)) continue;
+      const repoName = path.basename(rootPath);
+      if (mounts.some((m) => m.containerPath === `/workspace/extra/${repoName}`))
+        continue;
+      try {
+        const clonePath = await prepareRepoClone(
+          rootPath,
+          group.folder,
+          repoName,
+          'main',
+        );
         mounts.push({
-          hostPath: rootPath,
+          hostPath: clonePath,
           containerPath: `/workspace/extra/${repoName}`,
-          readonly: !root.allowReadWrite,
+          readonly: false,
         });
+      } catch (err) {
+        logger.warn(
+          { group: group.name, rootPath, err },
+          'Failed to clone allowlist repo — skipping',
+        );
       }
     }
   }
@@ -373,7 +353,7 @@ export async function runContainerAgent(
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
-  const mounts = await buildVolumeMounts(group, input.isMain, input.tenantId);
+  const mounts = await buildVolumeMounts(group, input.tenantId);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
   const containerArgs = buildContainerArgs(mounts, containerName);
@@ -396,7 +376,6 @@ export async function runContainerAgent(
       group: group.name,
       containerName,
       mountCount: mounts.length,
-      isMain: input.isMain,
     },
     'Spawning container agent',
   );
@@ -594,7 +573,6 @@ export async function runContainerAgent(
         `=== Container Run Log ===`,
         `Timestamp: ${new Date().toISOString()}`,
         `Group: ${group.name}`,
-        `IsMain: ${input.isMain}`,
         `Duration: ${duration}ms`,
         `Exit Code: ${code}`,
         `Stdout Truncated: ${stdoutTruncated}`,
@@ -746,7 +724,6 @@ export async function runContainerAgent(
 
 export function writeTasksSnapshot(
   groupFolder: string,
-  isMain: boolean,
   tasks: Array<{
     id: string;
     groupFolder: string;
@@ -762,10 +739,8 @@ export function writeTasksSnapshot(
   const groupIpcDir = resolveGroupIpcPath(groupFolder, tenantId);
   fs.mkdirSync(groupIpcDir, { recursive: true });
 
-  // Main sees all tasks, others only see their own
-  const filteredTasks = isMain
-    ? tasks
-    : tasks.filter((t) => t.groupFolder === groupFolder);
+  // Each group sees all tasks within its tenant
+  const filteredTasks = tasks;
 
   const tasksFile = path.join(groupIpcDir, 'current_tasks.json');
   fs.writeFileSync(tasksFile, JSON.stringify(filteredTasks, null, 2));
@@ -865,7 +840,6 @@ export function writeMemorySnapshot(
 
 export function writeGroupsSnapshot(
   groupFolder: string,
-  isMain: boolean,
   groups: AvailableGroup[],
   registeredJids: Set<string>,
   tenantId?: string,
@@ -873,8 +847,7 @@ export function writeGroupsSnapshot(
   const groupIpcDir = resolveGroupIpcPath(groupFolder, tenantId);
   fs.mkdirSync(groupIpcDir, { recursive: true });
 
-  // Main sees all groups; others see nothing (they can't activate groups)
-  const visibleGroups = isMain ? groups : [];
+  const visibleGroups = groups;
 
   const groupsFile = path.join(groupIpcDir, 'available_groups.json');
   fs.writeFileSync(

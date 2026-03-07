@@ -243,6 +243,12 @@ function createSchema(database: Database.Database): void {
       /* column already exists */
     }
   }
+
+  // Migrate is_main groups: ensure they have requires_trigger=0
+  // so they keep working without triggers after isMain removal.
+  database.exec(
+    `UPDATE registered_groups SET requires_trigger = 0 WHERE is_main = 1`,
+  );
 }
 
 export function initDatabase(): void {
@@ -680,7 +686,6 @@ export function getRegisteredGroup(
       : undefined,
     requiresTrigger:
       row.requires_trigger === null ? undefined : row.requires_trigger === 1,
-    isMain: row.is_main === 1 ? true : undefined,
     tenantId: row.tenant_id || DEFAULT_TENANT_ID,
   };
 }
@@ -700,7 +705,7 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.added_at,
     group.containerConfig ? JSON.stringify(group.containerConfig) : null,
     group.requiresTrigger === undefined ? 1 : group.requiresTrigger ? 1 : 0,
-    group.isMain ? 1 : 0,
+    0, // is_main deprecated — kept for schema compat
     group.tenantId || DEFAULT_TENANT_ID,
   );
 }
@@ -736,7 +741,6 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
         : undefined,
       requiresTrigger:
         row.requires_trigger === null ? undefined : row.requires_trigger === 1,
-      isMain: row.is_main === 1 ? true : undefined,
       tenantId: row.tenant_id || DEFAULT_TENANT_ID,
     };
   }

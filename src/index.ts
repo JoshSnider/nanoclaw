@@ -194,7 +194,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     return true;
   }
 
-  const isMainGroup = group.isMain === true;
   const tenantId = group.tenantId || DEFAULT_TENANT_ID;
 
   const sinceTimestamp = lastAgentTimestamp[chatJid] || '';
@@ -224,8 +223,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     return true;
   }
 
-  // For non-main groups, check if trigger is required and present
-  if (!isMainGroup && group.requiresTrigger !== false) {
+  // Check if trigger is required and present
+  if (group.requiresTrigger !== false) {
     const allowlistCfg = loadSenderAllowlist();
     const hasTrigger = missedMessages.some(
       (m) =>
@@ -349,15 +348,13 @@ async function runAgent(
   chatJid: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
-  const isMain = group.isMain === true;
   const tenantId = group.tenantId || DEFAULT_TENANT_ID;
   const sessionId = sessions[group.folder];
 
-  // Update tasks snapshot for container to read (filtered by group)
+  // Update tasks snapshot for container to read
   const tasks = getAllTasks();
   writeTasksSnapshot(
     group.folder,
-    isMain,
     tasks.map((t) => ({
       id: t.id,
       groupFolder: t.group_folder,
@@ -377,11 +374,10 @@ async function runAgent(
   // Update skill index snapshot (which skills are active for this group)
   writeSkillIndexSnapshot(group.folder, tenantId);
 
-  // Update available groups snapshot (main group only can see all groups)
+  // Update available groups snapshot
   const availableGroups = getAvailableGroups();
   writeGroupsSnapshot(
     group.folder,
-    isMain,
     availableGroups,
     new Set(Object.keys(registeredGroups)),
     tenantId,
@@ -406,7 +402,6 @@ async function runAgent(
         sessionId,
         groupFolder: group.folder,
         chatJid,
-        isMain,
         tenantId,
         assistantName: ASSISTANT_NAME,
       },
@@ -698,8 +693,7 @@ async function startMessageLoop(): Promise<void> {
             continue;
           }
 
-          const isMainGroup = group.isMain === true;
-          const needsTrigger = !isMainGroup && group.requiresTrigger !== false;
+          const needsTrigger = group.requiresTrigger !== false;
 
           // For non-main groups, only act on trigger messages.
           // Non-trigger messages accumulate in DB and get pulled as
@@ -916,8 +910,8 @@ async function main(): Promise<void> {
       );
     },
     getAvailableGroups,
-    writeGroupsSnapshot: (gf, im, ag, rj, ti) =>
-      writeGroupsSnapshot(gf, im, ag, rj, ti),
+    writeGroupsSnapshot: (gf, ag, rj, ti) =>
+      writeGroupsSnapshot(gf, ag, rj, ti),
     writeSkillIndexSnapshot: (gf, ti) => writeSkillIndexSnapshot(gf, ti),
   });
   queue.setProcessMessagesFn(processGroupMessages);

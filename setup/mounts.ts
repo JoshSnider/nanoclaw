@@ -38,19 +38,17 @@ export async function run(args: string[]): Promise<void> {
   fs.mkdirSync(configDir, { recursive: true });
 
   let allowedRoots = 0;
-  let nonMainReadOnly = 'true';
 
   if (empty) {
     logger.info('Writing empty mount allowlist');
     const emptyConfig = {
       allowedRoots: [],
       blockedPatterns: [],
-      nonMainReadOnly: true,
     };
     fs.writeFileSync(configFile, JSON.stringify(emptyConfig, null, 2) + '\n');
   } else if (json) {
     // Validate JSON with JSON.parse (not piped through shell)
-    let parsed: { allowedRoots?: unknown[]; nonMainReadOnly?: boolean };
+    let parsed: { allowedRoots?: unknown[] };
     try {
       parsed = JSON.parse(json);
     } catch {
@@ -58,7 +56,6 @@ export async function run(args: string[]): Promise<void> {
       emitStatus('CONFIGURE_MOUNTS', {
         PATH: configFile,
         ALLOWED_ROOTS: 0,
-        NON_MAIN_READ_ONLY: 'unknown',
         STATUS: 'failed',
         ERROR: 'invalid_json',
         LOG: 'logs/setup.log',
@@ -71,12 +68,11 @@ export async function run(args: string[]): Promise<void> {
     allowedRoots = Array.isArray(parsed.allowedRoots)
       ? parsed.allowedRoots.length
       : 0;
-    nonMainReadOnly = parsed.nonMainReadOnly === false ? 'false' : 'true';
   } else {
     // Read from stdin
     logger.info('Reading mount allowlist from stdin');
     const input = fs.readFileSync(0, 'utf-8');
-    let parsed: { allowedRoots?: unknown[]; nonMainReadOnly?: boolean };
+    let parsed: { allowedRoots?: unknown[] };
     try {
       parsed = JSON.parse(input);
     } catch {
@@ -84,7 +80,6 @@ export async function run(args: string[]): Promise<void> {
       emitStatus('CONFIGURE_MOUNTS', {
         PATH: configFile,
         ALLOWED_ROOTS: 0,
-        NON_MAIN_READ_ONLY: 'unknown',
         STATUS: 'failed',
         ERROR: 'invalid_json',
         LOG: 'logs/setup.log',
@@ -97,18 +92,16 @@ export async function run(args: string[]): Promise<void> {
     allowedRoots = Array.isArray(parsed.allowedRoots)
       ? parsed.allowedRoots.length
       : 0;
-    nonMainReadOnly = parsed.nonMainReadOnly === false ? 'false' : 'true';
   }
 
   logger.info(
-    { configFile, allowedRoots, nonMainReadOnly },
+    { configFile, allowedRoots },
     'Allowlist configured',
   );
 
   emitStatus('CONFIGURE_MOUNTS', {
     PATH: configFile,
     ALLOWED_ROOTS: allowedRoots,
-    NON_MAIN_READ_ONLY: nonMainReadOnly,
     STATUS: 'success',
     LOG: 'logs/setup.log',
   });

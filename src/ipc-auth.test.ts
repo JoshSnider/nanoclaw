@@ -17,7 +17,7 @@ const MAIN_GROUP: RegisteredGroup = {
   folder: 'whatsapp_main',
   trigger: 'always',
   added_at: '2024-01-01T00:00:00.000Z',
-  isMain: true,
+  requiresTrigger: false,
 };
 
 const OTHER_GROUP: RegisteredGroup = {
@@ -69,7 +69,7 @@ beforeEach(() => {
 // --- schedule_task authorization ---
 
 describe('schedule_task authorization', () => {
-  it('main group can schedule for another group', async () => {
+  it('any group can schedule for another group (same tenant)', async () => {
     await processTaskIpc(
       {
         type: 'schedule_task',
@@ -79,7 +79,6 @@ describe('schedule_task authorization', () => {
         targetJid: 'other@g.us',
       },
       'whatsapp_main',
-      true,
       deps,
     );
 
@@ -89,7 +88,7 @@ describe('schedule_task authorization', () => {
     expect(allTasks[0].group_folder).toBe('other-group');
   });
 
-  it('non-main group can schedule for itself', async () => {
+  it('group can schedule for itself', async () => {
     await processTaskIpc(
       {
         type: 'schedule_task',
@@ -99,7 +98,6 @@ describe('schedule_task authorization', () => {
         targetJid: 'other@g.us',
       },
       'other-group',
-      false,
       deps,
     );
 
@@ -108,17 +106,27 @@ describe('schedule_task authorization', () => {
     expect(allTasks[0].group_folder).toBe('other-group');
   });
 
-  it('non-main group cannot schedule for another group', async () => {
+  it('cross-tenant schedule is blocked', async () => {
+    // Set up a group owned by a different tenant
+    const crossTenantGroup: RegisteredGroup = {
+      name: 'Cross Tenant',
+      folder: 'cross-tenant-group',
+      trigger: '@Andy',
+      added_at: '2024-01-01T00:00:00.000Z',
+      tenantId: '11111111-1111-1111-1111-111111111111',
+    };
+    groups['cross@g.us'] = crossTenantGroup;
+    setRegisteredGroup('cross@g.us', crossTenantGroup);
+
     await processTaskIpc(
       {
         type: 'schedule_task',
-        prompt: 'unauthorized',
+        prompt: 'cross tenant',
         schedule_type: 'once',
         schedule_value: '2025-06-01T00:00:00',
-        targetJid: 'main@g.us',
+        targetJid: 'cross@g.us',
       },
       'other-group',
-      false,
       deps,
     );
 
@@ -136,7 +144,6 @@ describe('schedule_task authorization', () => {
         targetJid: 'unknown@g.us',
       },
       'whatsapp_main',
-      true,
       deps,
     );
 
@@ -175,34 +182,22 @@ describe('pause_task authorization', () => {
     });
   });
 
-  it('main group can pause any task', async () => {
+  it('any group can pause any task (same tenant)', async () => {
     await processTaskIpc(
       { type: 'pause_task', taskId: 'task-other' },
       'whatsapp_main',
-      true,
       deps,
     );
     expect(getTaskById('task-other')!.status).toBe('paused');
   });
 
-  it('non-main group can pause its own task', async () => {
-    await processTaskIpc(
-      { type: 'pause_task', taskId: 'task-other' },
-      'other-group',
-      false,
-      deps,
-    );
-    expect(getTaskById('task-other')!.status).toBe('paused');
-  });
-
-  it('non-main group cannot pause another groups task', async () => {
+  it('group can pause another groups task (same tenant)', async () => {
     await processTaskIpc(
       { type: 'pause_task', taskId: 'task-main' },
       'other-group',
-      false,
       deps,
     );
-    expect(getTaskById('task-main')!.status).toBe('active');
+    expect(getTaskById('task-main')!.status).toBe('paused');
   });
 });
 
@@ -224,41 +219,29 @@ describe('resume_task authorization', () => {
     });
   });
 
-  it('main group can resume any task', async () => {
+  it('any group can resume a task (same tenant)', async () => {
     await processTaskIpc(
       { type: 'resume_task', taskId: 'task-paused' },
       'whatsapp_main',
-      true,
       deps,
     );
     expect(getTaskById('task-paused')!.status).toBe('active');
   });
 
-  it('non-main group can resume its own task', async () => {
-    await processTaskIpc(
-      { type: 'resume_task', taskId: 'task-paused' },
-      'other-group',
-      false,
-      deps,
-    );
-    expect(getTaskById('task-paused')!.status).toBe('active');
-  });
-
-  it('non-main group cannot resume another groups task', async () => {
+  it('another group can resume a task (same tenant)', async () => {
     await processTaskIpc(
       { type: 'resume_task', taskId: 'task-paused' },
       'third-group',
-      false,
       deps,
     );
-    expect(getTaskById('task-paused')!.status).toBe('paused');
+    expect(getTaskById('task-paused')!.status).toBe('active');
   });
 });
 
 // --- cancel_task authorization ---
 
 describe('cancel_task authorization', () => {
-  it('main group can cancel any task', async () => {
+  it('any group can cancel a task (same tenant)', async () => {
     createTask({
       id: 'task-to-cancel',
       group_folder: 'other-group',
@@ -275,41 +258,17 @@ describe('cancel_task authorization', () => {
     await processTaskIpc(
       { type: 'cancel_task', taskId: 'task-to-cancel' },
       'whatsapp_main',
-      true,
       deps,
     );
     expect(getTaskById('task-to-cancel')).toBeUndefined();
   });
 
-  it('non-main group can cancel its own task', async () => {
-    createTask({
-      id: 'task-own',
-      group_folder: 'other-group',
-      chat_jid: 'other@g.us',
-      prompt: 'my task',
-      schedule_type: 'once',
-      schedule_value: '2025-06-01T00:00:00',
-      context_mode: 'isolated',
-      next_run: null,
-      status: 'active',
-      created_at: '2024-01-01T00:00:00.000Z',
-    });
-
-    await processTaskIpc(
-      { type: 'cancel_task', taskId: 'task-own' },
-      'other-group',
-      false,
-      deps,
-    );
-    expect(getTaskById('task-own')).toBeUndefined();
-  });
-
-  it('non-main group cannot cancel another groups task', async () => {
+  it('another group can cancel a task (same tenant)', async () => {
     createTask({
       id: 'task-foreign',
       group_folder: 'whatsapp_main',
       chat_jid: 'main@g.us',
-      prompt: 'not yours',
+      prompt: 'not yours but same tenant',
       schedule_type: 'once',
       schedule_value: '2025-06-01T00:00:00',
       context_mode: 'isolated',
@@ -321,17 +280,16 @@ describe('cancel_task authorization', () => {
     await processTaskIpc(
       { type: 'cancel_task', taskId: 'task-foreign' },
       'other-group',
-      false,
       deps,
     );
-    expect(getTaskById('task-foreign')).toBeDefined();
+    expect(getTaskById('task-foreign')).toBeUndefined();
   });
 });
 
 // --- register_group authorization ---
 
 describe('register_group authorization', () => {
-  it('non-main group cannot register a group', async () => {
+  it('any group can register a new group (same tenant)', async () => {
     await processTaskIpc(
       {
         type: 'register_group',
@@ -341,15 +299,14 @@ describe('register_group authorization', () => {
         trigger: '@Andy',
       },
       'other-group',
-      false,
       deps,
     );
 
-    // registeredGroups should not have changed
-    expect(groups['new@g.us']).toBeUndefined();
+    expect(groups['new@g.us']).toBeDefined();
+    expect(groups['new@g.us'].folder).toBe('new-group');
   });
 
-  it('main group cannot register with unsafe folder path', async () => {
+  it('rejects register with unsafe folder path', async () => {
     await processTaskIpc(
       {
         type: 'register_group',
@@ -359,7 +316,6 @@ describe('register_group authorization', () => {
         trigger: '@Andy',
       },
       'whatsapp_main',
-      true,
       deps,
     );
 
@@ -369,70 +325,65 @@ describe('register_group authorization', () => {
 
 // --- refresh_groups authorization ---
 
-describe('refresh_groups authorization', () => {
-  it('non-main group cannot trigger refresh', async () => {
-    // This should be silently blocked (no crash, no effect)
+describe('refresh_groups', () => {
+  it('any group can trigger refresh', async () => {
     await processTaskIpc(
       { type: 'refresh_groups' },
       'other-group',
-      false,
       deps,
     );
-    // If we got here without error, the auth gate worked
+    // If we got here without error, it worked
   });
 });
 
 // --- IPC message authorization ---
 // Tests the authorization pattern from startIpcWatcher (ipc.ts).
-// The logic: isMain || (targetGroup && targetGroup.folder === sourceGroup)
+// The logic: same tenant check only — all groups within a tenant can message each other.
 
 describe('IPC message authorization', () => {
   // Replicate the exact check from the IPC watcher
   function isMessageAuthorized(
-    sourceGroup: string,
-    isMain: boolean,
+    tenantId: string,
     targetChatJid: string,
     registeredGroups: Record<string, RegisteredGroup>,
   ): boolean {
     const targetGroup = registeredGroups[targetChatJid];
-    return isMain || (!!targetGroup && targetGroup.folder === sourceGroup);
+    const sameTenant =
+      !targetGroup ||
+      !targetGroup.tenantId ||
+      targetGroup.tenantId === tenantId;
+    return sameTenant;
   }
 
-  it('main group can send to any group', () => {
+  it('group can send to any group (same tenant)', () => {
     expect(
-      isMessageAuthorized('whatsapp_main', true, 'other@g.us', groups),
+      isMessageAuthorized('default', 'other@g.us', groups),
     ).toBe(true);
     expect(
-      isMessageAuthorized('whatsapp_main', true, 'third@g.us', groups),
-    ).toBe(true);
-  });
-
-  it('non-main group can send to its own chat', () => {
-    expect(
-      isMessageAuthorized('other-group', false, 'other@g.us', groups),
+      isMessageAuthorized('default', 'third@g.us', groups),
     ).toBe(true);
   });
 
-  it('non-main group cannot send to another groups chat', () => {
-    expect(isMessageAuthorized('other-group', false, 'main@g.us', groups)).toBe(
-      false,
-    );
+  it('group can send to unregistered JID', () => {
     expect(
-      isMessageAuthorized('other-group', false, 'third@g.us', groups),
+      isMessageAuthorized('default', 'unknown@g.us', groups),
+    ).toBe(true);
+  });
+
+  it('cross-tenant message is blocked', () => {
+    const crossTenantGroups = {
+      ...groups,
+      'cross@g.us': {
+        name: 'Cross',
+        folder: 'cross-group',
+        trigger: '@Andy',
+        added_at: '2024-01-01T00:00:00.000Z',
+        tenantId: '22222222-2222-2222-2222-222222222222',
+      },
+    };
+    expect(
+      isMessageAuthorized('default', 'cross@g.us', crossTenantGroups),
     ).toBe(false);
-  });
-
-  it('non-main group cannot send to unregistered JID', () => {
-    expect(
-      isMessageAuthorized('other-group', false, 'unknown@g.us', groups),
-    ).toBe(false);
-  });
-
-  it('main group can send to unregistered JID', () => {
-    // Main is always authorized regardless of target
-    expect(
-      isMessageAuthorized('whatsapp_main', true, 'unknown@g.us', groups),
-    ).toBe(true);
   });
 });
 
@@ -449,7 +400,6 @@ describe('schedule_task schedule types', () => {
         targetJid: 'other@g.us',
       },
       'whatsapp_main',
-      true,
       deps,
     );
 
@@ -473,7 +423,6 @@ describe('schedule_task schedule types', () => {
         targetJid: 'other@g.us',
       },
       'whatsapp_main',
-      true,
       deps,
     );
 
@@ -492,7 +441,6 @@ describe('schedule_task schedule types', () => {
         targetJid: 'other@g.us',
       },
       'whatsapp_main',
-      true,
       deps,
     );
 
@@ -515,7 +463,6 @@ describe('schedule_task schedule types', () => {
         targetJid: 'other@g.us',
       },
       'whatsapp_main',
-      true,
       deps,
     );
 
@@ -532,7 +479,6 @@ describe('schedule_task schedule types', () => {
         targetJid: 'other@g.us',
       },
       'whatsapp_main',
-      true,
       deps,
     );
 
@@ -549,7 +495,6 @@ describe('schedule_task schedule types', () => {
         targetJid: 'other@g.us',
       },
       'whatsapp_main',
-      true,
       deps,
     );
 
@@ -571,7 +516,6 @@ describe('schedule_task context_mode', () => {
         targetJid: 'other@g.us',
       },
       'whatsapp_main',
-      true,
       deps,
     );
 
@@ -590,7 +534,6 @@ describe('schedule_task context_mode', () => {
         targetJid: 'other@g.us',
       },
       'whatsapp_main',
-      true,
       deps,
     );
 
@@ -609,7 +552,6 @@ describe('schedule_task context_mode', () => {
         targetJid: 'other@g.us',
       },
       'whatsapp_main',
-      true,
       deps,
     );
 
@@ -627,7 +569,6 @@ describe('schedule_task context_mode', () => {
         targetJid: 'other@g.us',
       },
       'whatsapp_main',
-      true,
       deps,
     );
 
@@ -639,7 +580,7 @@ describe('schedule_task context_mode', () => {
 // --- register_group success path ---
 
 describe('register_group success', () => {
-  it('main group can register a new group', async () => {
+  it('group can register a new group', async () => {
     await processTaskIpc(
       {
         type: 'register_group',
@@ -649,7 +590,6 @@ describe('register_group success', () => {
         trigger: '@Andy',
       },
       'whatsapp_main',
-      true,
       deps,
     );
 
@@ -670,7 +610,6 @@ describe('register_group success', () => {
         // missing folder and trigger
       },
       'whatsapp_main',
-      true,
       deps,
     );
 
