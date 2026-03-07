@@ -67,3 +67,16 @@ export const TRIGGER_PATTERN = new RegExp(
 // Uses system timezone by default
 export const TIMEZONE =
   process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+// --- Multi-tenancy ---
+export const TENANT_AUTO_CREATE =
+  (process.env.TENANT_AUTO_CREATE ?? 'true') === 'true';
+export const DEFAULT_RATE_LIMIT_RPM = parseInt(
+  process.env.DEFAULT_RATE_LIMIT_RPM || '20',
+  10,
+);
+export const DEFAULT_RATE_LIMIT_DAILY = parseInt(
+  process.env.DEFAULT_RATE_LIMIT_DAILY || '200',
+  10,
+);
+export const DEFAULT_TENANT_ID = 'default';

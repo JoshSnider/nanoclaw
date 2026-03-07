@@ -28,6 +28,7 @@ import {
   validateAdditionalMounts,
 } from './mount-security.js';
 import { isGitRepo, prepareRepoClone } from './repo-manager.js';
+import { getTenantApiKey } from './tenant.js';
 import { RegisteredGroup } from './types.js';
 
 // Sentinel markers for robust output parsing (must match agent-runner)
@@ -42,6 +43,7 @@ export interface ContainerInput {
   isMain: boolean;
   isScheduledTask?: boolean;
   assistantName?: string;
+  tenantId?: string;
   secrets?: Record<string, string>;
 }
 
@@ -61,12 +63,16 @@ interface VolumeMount {
 async function buildVolumeMounts(
   group: RegisteredGroup,
   isMain: boolean,
+  tenantId?: string,
 ): Promise<VolumeMount[]> {
   const mounts: VolumeMount[] = [];
   const projectRoot = process.cwd();
-  const groupDir = resolveGroupFolderPath(group.folder);
+  const effectiveTenantId = tenantId || group.tenantId;
+  const groupDir = resolveGroupFolderPath(group.folder, effectiveTenantId);
 
-  if (isMain) {
+  // Only operator tenant's main group gets the project root mount
+  const isOperator = !effectiveTenantId || effectiveTenantId === 'default';
+  if (isMain && isOperator) {
     // Main gets the project root read-only. Writable paths the agent needs
     // (group folder, IPC, .claude/) are mounted separately below.
     // Read-only prevents the agent from modifying host application code
@@ -166,7 +172,7 @@ async function buildVolumeMounts(
 
   // Per-group IPC namespace: each group gets its own IPC directory
   // This prevents cross-group privilege escalation via IPC
-  const groupIpcDir = resolveGroupIpcPath(group.folder);
+  const groupIpcDir = resolveGroupIpcPath(group.folder, effectiveTenantId);
   fs.mkdirSync(path.join(groupIpcDir, 'messages'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'tasks'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'input'), { recursive: true });
@@ -282,15 +288,26 @@ async function buildVolumeMounts(
 
 /**
  * Read allowed secrets from .env for passing to the container via stdin.
+ * If tenant has a BYOK API key, use that instead of the operator's key.
  * Secrets are never written to disk or mounted as files.
  */
-function readSecrets(): Record<string, string> {
-  return readEnvFile([
+function readSecrets(tenantId?: string): Record<string, string> {
+  const secrets = readEnvFile([
     'CLAUDE_CODE_OAUTH_TOKEN',
     'ANTHROPIC_API_KEY',
     'ANTHROPIC_BASE_URL',
     'ANTHROPIC_AUTH_TOKEN',
   ]);
+
+  // BYOK: if tenant has their own API key, override the operator's
+  if (tenantId && tenantId !== 'default') {
+    const tenantKey = getTenantApiKey(tenantId);
+    if (tenantKey) {
+      secrets.ANTHROPIC_API_KEY = tenantKey;
+    }
+  }
+
+  return secrets;
 }
 
 function buildContainerArgs(
@@ -356,7 +373,7 @@ export async function runContainerAgent(
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
-  const mounts = await buildVolumeMounts(group, input.isMain);
+  const mounts = await buildVolumeMounts(group, input.isMain, input.tenantId);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
   const containerArgs = buildContainerArgs(mounts, containerName);
@@ -400,7 +417,7 @@ export async function runContainerAgent(
     let stderrTruncated = false;
 
     // Pass secrets via stdin (never written to disk or mounted as files)
-    input.secrets = readSecrets();
+    input.secrets = readSecrets(input.tenantId);
     container.stdin.write(JSON.stringify(input));
     container.stdin.end();
     // Remove secrets from input so they don't appear in logs
@@ -739,9 +756,10 @@ export function writeTasksSnapshot(
     status: string;
     next_run: string | null;
   }>,
+  tenantId?: string,
 ): void {
   // Write filtered tasks to the group's IPC directory
-  const groupIpcDir = resolveGroupIpcPath(groupFolder);
+  const groupIpcDir = resolveGroupIpcPath(groupFolder, tenantId);
   fs.mkdirSync(groupIpcDir, { recursive: true });
 
   // Main sees all tasks, others only see their own
@@ -780,8 +798,11 @@ export interface SkillIndexEntry {
  * Active skills (per DB) are flagged so the agent runner knows which
  * skill MCP servers to start.
  */
-export function writeSkillIndexSnapshot(groupFolder: string): void {
-  const groupIpcDir = resolveGroupIpcPath(groupFolder);
+export function writeSkillIndexSnapshot(
+  groupFolder: string,
+  tenantId?: string,
+): void {
+  const groupIpcDir = resolveGroupIpcPath(groupFolder, tenantId);
   fs.mkdirSync(groupIpcDir, { recursive: true });
 
   // Create the responses dir for skill request/response roundtrips
@@ -796,14 +817,12 @@ export function writeSkillIndexSnapshot(groupFolder: string): void {
       const manifestPath = path.join(skillsSrc, skillDir, 'manifest.json');
       if (!fs.existsSync(manifestPath)) continue;
       try {
-        const manifest = JSON.parse(
-          fs.readFileSync(manifestPath, 'utf-8'),
-        );
+        const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
         entries.push({
           name: manifest.name,
           description: manifest.description,
           active: activeSkills.has(manifest.name),
-          hasMcpServer: !!(manifest.mcpServer),
+          hasMcpServer: !!manifest.mcpServer,
         });
       } catch (err) {
         logger.warn({ skillDir, err }, 'Failed to parse skill manifest');
@@ -836,8 +855,9 @@ export function writeMemorySnapshot(
     archived_at: string;
     message_count: number;
   }[],
+  tenantId?: string,
 ): void {
-  const groupIpcDir = resolveGroupIpcPath(groupFolder);
+  const groupIpcDir = resolveGroupIpcPath(groupFolder, tenantId);
   fs.mkdirSync(groupIpcDir, { recursive: true });
   const indexFile = path.join(groupIpcDir, 'memory_index.json');
   fs.writeFileSync(indexFile, JSON.stringify({ conversations }, null, 2));
@@ -848,8 +868,9 @@ export function writeGroupsSnapshot(
   isMain: boolean,
   groups: AvailableGroup[],
   registeredJids: Set<string>,
+  tenantId?: string,
 ): void {
-  const groupIpcDir = resolveGroupIpcPath(groupFolder);
+  const groupIpcDir = resolveGroupIpcPath(groupFolder, tenantId);
   fs.mkdirSync(groupIpcDir, { recursive: true });
 
   // Main sees all groups; others see nothing (they can't activate groups)

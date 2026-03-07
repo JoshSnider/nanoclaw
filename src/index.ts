@@ -56,12 +56,23 @@ import {
   shouldDropMessage,
 } from './sender-allowlist.js';
 import { startSchedulerLoop } from './task-scheduler.js';
+import { checkRateLimit, recordUsage, resolveTenant } from './tenant.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
-import { DATA_DIR } from './config.js';
+import { DATA_DIR, DEFAULT_TENANT_ID } from './config.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
+
+/** Derive channel name from a chat JID pattern. */
+function detectChannel(chatJid: string): string | null {
+  if (chatJid.includes('@g.us') || chatJid.includes('@s.whatsapp.net'))
+    return 'whatsapp';
+  if (chatJid.startsWith('tg:')) return 'telegram';
+  if (chatJid.startsWith('slack:')) return 'slack';
+  if (chatJid.startsWith('dc:')) return 'discord';
+  return null;
+}
 
 let lastTimestamp = '';
 let sessions: Record<string, string> = {};
@@ -123,7 +134,7 @@ function clearInFlight(chatJid: string): void {
 function registerGroup(jid: string, group: RegisteredGroup): void {
   let groupDir: string;
   try {
-    groupDir = resolveGroupFolderPath(group.folder);
+    groupDir = resolveGroupFolderPath(group.folder, group.tenantId);
   } catch (err) {
     logger.warn(
       { jid, folder: group.folder, err },
@@ -184,6 +195,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   }
 
   const isMainGroup = group.isMain === true;
+  const tenantId = group.tenantId || DEFAULT_TENANT_ID;
 
   const sinceTimestamp = lastAgentTimestamp[chatJid] || '';
   const missedMessages = getMessagesSince(
@@ -193,6 +205,24 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   );
 
   if (missedMessages.length === 0) return true;
+
+  // Rate limit check for non-operator tenants
+  const rateCheck = checkRateLimit(tenantId);
+  if (!rateCheck.allowed) {
+    const channel = findChannel(channels, chatJid);
+    if (channel && rateCheck.reason) {
+      channel
+        .sendMessage(chatJid, `_${rateCheck.reason}_`)
+        .catch((err) =>
+          logger.warn({ chatJid, err }, 'Failed to send rate limit message'),
+        );
+    }
+    // Advance cursor so we don't re-check these messages
+    lastAgentTimestamp[chatJid] =
+      missedMessages[missedMessages.length - 1].timestamp;
+    saveState();
+    return true;
+  }
 
   // For non-main groups, check if trigger is required and present
   if (!isMainGroup && group.requiresTrigger !== false) {
@@ -249,6 +279,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let hadError = false;
   let outputSentToUser = false;
 
+  // Record usage for rate limiting
+  recordUsage(tenantId);
+
   const output = await runAgent(group, prompt, chatJid, async (result) => {
     // Streaming output callback — called for each agent result
     if (result.result) {
@@ -280,7 +313,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   if (idleTimer) clearTimeout(idleTimer);
 
   // Archive session transcript + notes to DB and shared/conversations/
-  processSessionArchive(group.folder, sessions[group.folder]).catch(
+  processSessionArchive(group.folder, sessions[group.folder], tenantId).catch(
     (err: unknown) =>
       logger.error({ group: group.name, err }, 'Failed to archive session'),
   );
@@ -317,6 +350,7 @@ async function runAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
+  const tenantId = group.tenantId || DEFAULT_TENANT_ID;
   const sessionId = sessions[group.folder];
 
   // Update tasks snapshot for container to read (filtered by group)
@@ -333,14 +367,15 @@ async function runAgent(
       status: t.status,
       next_run: t.next_run,
     })),
+    tenantId,
   );
 
   // Update memory index snapshot for container to search
   const conversations = getRecentConversations(200);
-  writeMemorySnapshot(group.folder, conversations);
+  writeMemorySnapshot(group.folder, conversations, tenantId);
 
   // Update skill index snapshot (which skills are active for this group)
-  writeSkillIndexSnapshot(group.folder);
+  writeSkillIndexSnapshot(group.folder, tenantId);
 
   // Update available groups snapshot (main group only can see all groups)
   const availableGroups = getAvailableGroups();
@@ -349,6 +384,7 @@ async function runAgent(
     isMain,
     availableGroups,
     new Set(Object.keys(registeredGroups)),
+    tenantId,
   );
 
   // Wrap onOutput to track session ID from streamed results
@@ -371,6 +407,7 @@ async function runAgent(
         groupFolder: group.folder,
         chatJid,
         isMain,
+        tenantId,
         assistantName: ASSISTANT_NAME,
       },
       (proc, containerName) =>
@@ -462,8 +499,9 @@ function formatTranscriptMarkdown(
 async function processSessionArchive(
   groupFolder: string,
   sessionId: string | undefined,
+  tenantId?: string,
 ): Promise<void> {
-  const groupDir = resolveGroupFolderPath(groupFolder);
+  const groupDir = resolveGroupFolderPath(groupFolder, tenantId);
   const allMessages: ParsedMessage[] = [];
 
   // 1. Read pre-compact transcripts from groups/{folder}/transcripts/
@@ -800,6 +838,15 @@ async function main(): Promise<void> {
           return;
         }
       }
+
+      // Resolve tenant from sender identity (for non-bot inbound messages)
+      if (!msg.is_from_me && !msg.is_bot_message && msg.sender) {
+        const channelName = detectChannel(chatJid);
+        if (channelName) {
+          resolveTenant(msg.sender, channelName);
+        }
+      }
+
       storeMessage(msg);
     },
     onChatMetadata: (
@@ -869,9 +916,9 @@ async function main(): Promise<void> {
       );
     },
     getAvailableGroups,
-    writeGroupsSnapshot: (gf, im, ag, rj) =>
-      writeGroupsSnapshot(gf, im, ag, rj),
-    writeSkillIndexSnapshot: (gf) => writeSkillIndexSnapshot(gf),
+    writeGroupsSnapshot: (gf, im, ag, rj, ti) =>
+      writeGroupsSnapshot(gf, im, ag, rj, ti),
+    writeSkillIndexSnapshot: (gf, ti) => writeSkillIndexSnapshot(gf, ti),
   });
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();

@@ -12,6 +12,7 @@ vi.mock('./config.js', () => ({
   CONTAINER_MAX_OUTPUT_SIZE: 10485760,
   CONTAINER_TIMEOUT: 1800000, // 30min
   DATA_DIR: '/tmp/nanoclaw-test-data',
+  DEFAULT_TENANT_ID: 'default',
   GROUPS_DIR: '/tmp/nanoclaw-test-groups',
   IDLE_TIMEOUT: 900000, // 15min
   TIMEZONE: 'America/Los_Angeles',
@@ -55,6 +56,11 @@ vi.mock('./mount-security.js', () => ({
 vi.mock('./worktree.js', () => ({
   createWorktrees: vi.fn(async () => new Map()),
   isGitRepo: vi.fn(() => false),
+}));
+
+// Mock tenant
+vi.mock('./tenant.js', () => ({
+  getTenantApiKey: vi.fn(() => null),
 }));
 
 // Create a controllable fake ChildProcess

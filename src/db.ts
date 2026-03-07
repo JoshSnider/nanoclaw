@@ -2,7 +2,12 @@ import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
 
-import { ASSISTANT_NAME, DATA_DIR, STORE_DIR } from './config.js';
+import {
+  ASSISTANT_NAME,
+  DATA_DIR,
+  DEFAULT_TENANT_ID,
+  STORE_DIR,
+} from './config.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import {
@@ -124,6 +129,44 @@ function createSchema(database: Database.Database): void {
     );
   `);
 
+  // --- Multi-tenancy tables ---
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS tenants (
+      id TEXT PRIMARY KEY,
+      display_name TEXT NOT NULL,
+      status TEXT DEFAULT 'active',
+      anthropic_api_key_encrypted TEXT,
+      rate_limit_rpm INTEGER DEFAULT 20,
+      rate_limit_daily INTEGER DEFAULT 200,
+      is_operator INTEGER DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS tenant_identities (
+      sender_id TEXT NOT NULL,
+      channel TEXT NOT NULL,
+      tenant_id TEXT NOT NULL REFERENCES tenants(id),
+      linked_at TEXT NOT NULL,
+      PRIMARY KEY (sender_id, channel)
+    );
+
+    CREATE TABLE IF NOT EXISTS usage_tracking (
+      tenant_id TEXT NOT NULL REFERENCES tenants(id),
+      date TEXT NOT NULL,
+      request_count INTEGER DEFAULT 0,
+      PRIMARY KEY (tenant_id, date)
+    );
+  `);
+
+  // Ensure default operator tenant exists
+  database
+    .prepare(
+      `INSERT OR IGNORE INTO tenants (id, display_name, status, is_operator, rate_limit_rpm, rate_limit_daily, created_at, updated_at)
+     VALUES (?, 'Operator', 'active', 1, 0, 0, ?, ?)`,
+    )
+    .run(DEFAULT_TENANT_ID, new Date().toISOString(), new Date().toISOString());
+
   // Add context_mode column if it doesn't exist (migration for existing DBs)
   try {
     database.exec(
@@ -178,6 +221,27 @@ function createSchema(database: Database.Database): void {
     );
   } catch {
     /* columns already exist */
+  }
+
+  // Add tenant_id columns to existing tables (multi-tenancy migration)
+  const tenantMigrations = [
+    'chats',
+    'messages',
+    'registered_groups',
+    'scheduled_tasks',
+    'sessions',
+    'conversation_archives',
+    'mcp_active_skills',
+    'mcp_credentials',
+  ];
+  for (const table of tenantMigrations) {
+    try {
+      database.exec(
+        `ALTER TABLE ${table} ADD COLUMN tenant_id TEXT DEFAULT 'default'`,
+      );
+    } catch {
+      /* column already exists */
+    }
   }
 }
 
@@ -594,6 +658,7 @@ export function getRegisteredGroup(
         container_config: string | null;
         requires_trigger: number | null;
         is_main: number | null;
+        tenant_id: string | null;
       }
     | undefined;
   if (!row) return undefined;
@@ -616,6 +681,7 @@ export function getRegisteredGroup(
     requiresTrigger:
       row.requires_trigger === null ? undefined : row.requires_trigger === 1,
     isMain: row.is_main === 1 ? true : undefined,
+    tenantId: row.tenant_id || DEFAULT_TENANT_ID,
   };
 }
 
@@ -624,8 +690,8 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     throw new Error(`Invalid group folder "${group.folder}" for JID ${jid}`);
   }
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger, is_main)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger, is_main, tenant_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     jid,
     group.name,
@@ -635,6 +701,7 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.containerConfig ? JSON.stringify(group.containerConfig) : null,
     group.requiresTrigger === undefined ? 1 : group.requiresTrigger ? 1 : 0,
     group.isMain ? 1 : 0,
+    group.tenantId || DEFAULT_TENANT_ID,
   );
 }
 
@@ -648,6 +715,7 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
     container_config: string | null;
     requires_trigger: number | null;
     is_main: number | null;
+    tenant_id: string | null;
   }>;
   const result: Record<string, RegisteredGroup> = {};
   for (const row of rows) {
@@ -669,6 +737,7 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
       requiresTrigger:
         row.requires_trigger === null ? undefined : row.requires_trigger === 1,
       isMain: row.is_main === 1 ? true : undefined,
+      tenantId: row.tenant_id || DEFAULT_TENANT_ID,
     };
   }
   return result;
@@ -825,6 +894,133 @@ export function deleteSkillCredentials(
   db.prepare(
     `DELETE FROM mcp_credentials WHERE group_folder = ? AND skill_name = ?`,
   ).run(groupFolder, skillName);
+}
+
+// --- Tenant accessors ---
+
+export interface Tenant {
+  id: string;
+  display_name: string;
+  status: string;
+  anthropic_api_key_encrypted: string | null;
+  rate_limit_rpm: number;
+  rate_limit_daily: number;
+  is_operator: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export function getTenant(id: string): Tenant | undefined {
+  return db.prepare('SELECT * FROM tenants WHERE id = ?').get(id) as
+    | Tenant
+    | undefined;
+}
+
+export function createTenant(tenant: {
+  id: string;
+  display_name: string;
+  rate_limit_rpm?: number;
+  rate_limit_daily?: number;
+  is_operator?: boolean;
+}): void {
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO tenants (id, display_name, status, rate_limit_rpm, rate_limit_daily, is_operator, created_at, updated_at)
+     VALUES (?, ?, 'active', ?, ?, ?, ?, ?)`,
+  ).run(
+    tenant.id,
+    tenant.display_name,
+    tenant.rate_limit_rpm ?? 20,
+    tenant.rate_limit_daily ?? 200,
+    tenant.is_operator ? 1 : 0,
+    now,
+    now,
+  );
+}
+
+export function updateTenant(
+  id: string,
+  updates: Partial<
+    Pick<
+      Tenant,
+      | 'display_name'
+      | 'status'
+      | 'anthropic_api_key_encrypted'
+      | 'rate_limit_rpm'
+      | 'rate_limit_daily'
+    >
+  >,
+): void {
+  const fields: string[] = ['updated_at = ?'];
+  const values: unknown[] = [new Date().toISOString()];
+
+  if (updates.display_name !== undefined) {
+    fields.push('display_name = ?');
+    values.push(updates.display_name);
+  }
+  if (updates.status !== undefined) {
+    fields.push('status = ?');
+    values.push(updates.status);
+  }
+  if (updates.anthropic_api_key_encrypted !== undefined) {
+    fields.push('anthropic_api_key_encrypted = ?');
+    values.push(updates.anthropic_api_key_encrypted);
+  }
+  if (updates.rate_limit_rpm !== undefined) {
+    fields.push('rate_limit_rpm = ?');
+    values.push(updates.rate_limit_rpm);
+  }
+  if (updates.rate_limit_daily !== undefined) {
+    fields.push('rate_limit_daily = ?');
+    values.push(updates.rate_limit_daily);
+  }
+
+  values.push(id);
+  db.prepare(`UPDATE tenants SET ${fields.join(', ')} WHERE id = ?`).run(
+    ...values,
+  );
+}
+
+export function lookupTenantByIdentity(
+  senderId: string,
+  channel: string,
+): string | undefined {
+  const row = db
+    .prepare(
+      'SELECT tenant_id FROM tenant_identities WHERE sender_id = ? AND channel = ?',
+    )
+    .get(senderId, channel) as { tenant_id: string } | undefined;
+  return row?.tenant_id;
+}
+
+export function linkTenantIdentity(
+  senderId: string,
+  channel: string,
+  tenantId: string,
+): void {
+  db.prepare(
+    `INSERT OR REPLACE INTO tenant_identities (sender_id, channel, tenant_id, linked_at)
+     VALUES (?, ?, ?, ?)`,
+  ).run(senderId, channel, tenantId, new Date().toISOString());
+}
+
+export function getTenantUsageToday(tenantId: string): number {
+  const today = new Date().toISOString().slice(0, 10);
+  const row = db
+    .prepare(
+      'SELECT request_count FROM usage_tracking WHERE tenant_id = ? AND date = ?',
+    )
+    .get(tenantId, today) as { request_count: number } | undefined;
+  return row?.request_count ?? 0;
+}
+
+export function incrementTenantUsage(tenantId: string): void {
+  const today = new Date().toISOString().slice(0, 10);
+  db.prepare(
+    `INSERT INTO usage_tracking (tenant_id, date, request_count)
+     VALUES (?, ?, 1)
+     ON CONFLICT(tenant_id, date) DO UPDATE SET request_count = request_count + 1`,
+  ).run(tenantId, today);
 }
 
 // --- JSON migration ---

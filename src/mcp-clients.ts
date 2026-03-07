@@ -38,13 +38,22 @@ export interface DiscoveredTool {
 
 interface ManagedClient {
   client: Client;
-  transport: SSEClientTransport | StdioClientTransport | StreamableHTTPClientTransport;
+  transport:
+    | SSEClientTransport
+    | StdioClientTransport
+    | StreamableHTTPClientTransport;
   tools: DiscoveredTool[];
   config: McpServerConfig;
 }
 
-/** Active MCP clients keyed by skill name. */
+/** Active MCP clients keyed by "{tenantId}:{skillName}" (or just skillName for default). */
 const clients = new Map<string, ManagedClient>();
+
+function clientKey(skillName: string, tenantId?: string): string {
+  return tenantId && tenantId !== 'default'
+    ? `${tenantId}:${skillName}`
+    : skillName;
+}
 
 /**
  * Resolve credential references in an MCP server config.
@@ -91,9 +100,10 @@ export async function connectMcpServer(
   skillName: string,
   config: McpServerConfig,
   credentials: Record<string, string>,
+  tenantId?: string,
 ): Promise<DiscoveredTool[]> {
   // Disconnect existing client if any
-  await disconnectMcpServer(skillName);
+  await disconnectMcpServer(skillName, tenantId);
 
   const { resolvedAuth, resolvedEnv } = resolveCredentials(config, credentials);
 
@@ -102,7 +112,10 @@ export async function connectMcpServer(
     { capabilities: {} },
   );
 
-  let transport: SSEClientTransport | StdioClientTransport | StreamableHTTPClientTransport;
+  let transport:
+    | SSEClientTransport
+    | StdioClientTransport
+    | StreamableHTTPClientTransport;
 
   if (config.url) {
     // Remote MCP server — try StreamableHTTP first, fall back to SSE
@@ -135,7 +148,7 @@ export async function connectMcpServer(
   } else if (config.command) {
     // Local MCP server — spawn process with credentials as env vars
     const env: Record<string, string> = {
-      ...process.env as Record<string, string>,
+      ...(process.env as Record<string, string>),
       ...resolvedEnv,
     };
 
@@ -163,7 +176,12 @@ export async function connectMcpServer(
     inputSchema: t.inputSchema as Record<string, unknown> | undefined,
   }));
 
-  clients.set(skillName, { client, transport, tools, config });
+  clients.set(clientKey(skillName, tenantId), {
+    client,
+    transport,
+    tools,
+    config,
+  });
 
   logger.info(
     { skillName, toolCount: tools.length },
@@ -180,15 +198,19 @@ export async function callMcpTool(
   skillName: string,
   toolName: string,
   args: Record<string, unknown>,
+  tenantId?: string,
 ): Promise<unknown> {
-  const managed = clients.get(skillName);
+  const managed = clients.get(clientKey(skillName, tenantId));
   if (!managed) {
     throw new Error(
       `No MCP client connected for skill "${skillName}". Was the skill activated?`,
     );
   }
 
-  const result = await managed.client.callTool({ name: toolName, arguments: args });
+  const result = await managed.client.callTool({
+    name: toolName,
+    arguments: args,
+  });
 
   // Extract text content from the MCP result
   if (result.content && Array.isArray(result.content)) {
@@ -217,22 +239,29 @@ export async function callMcpTool(
 /**
  * Get discovered tools for a connected MCP server.
  */
-export function getMcpTools(skillName: string): DiscoveredTool[] | null {
-  return clients.get(skillName)?.tools ?? null;
+export function getMcpTools(
+  skillName: string,
+  tenantId?: string,
+): DiscoveredTool[] | null {
+  return clients.get(clientKey(skillName, tenantId))?.tools ?? null;
 }
 
 /**
  * Check if a skill has an active MCP client.
  */
-export function hasMcpClient(skillName: string): boolean {
-  return clients.has(skillName);
+export function hasMcpClient(skillName: string, tenantId?: string): boolean {
+  return clients.has(clientKey(skillName, tenantId));
 }
 
 /**
  * Disconnect and clean up an MCP client.
  */
-export async function disconnectMcpServer(skillName: string): Promise<void> {
-  const managed = clients.get(skillName);
+export async function disconnectMcpServer(
+  skillName: string,
+  tenantId?: string,
+): Promise<void> {
+  const key = clientKey(skillName, tenantId);
+  const managed = clients.get(key);
   if (!managed) return;
 
   try {
@@ -240,7 +269,7 @@ export async function disconnectMcpServer(skillName: string): Promise<void> {
   } catch (err) {
     logger.warn({ skillName, err }, 'Error closing MCP client');
   }
-  clients.delete(skillName);
+  clients.delete(key);
   logger.info({ skillName }, 'MCP client disconnected');
 }
 
@@ -248,6 +277,17 @@ export async function disconnectMcpServer(skillName: string): Promise<void> {
  * Disconnect all MCP clients (for shutdown).
  */
 export async function disconnectAllMcpServers(): Promise<void> {
-  const names = [...clients.keys()];
-  await Promise.all(names.map(disconnectMcpServer));
+  const keys = [...clients.keys()];
+  await Promise.all(
+    keys.map(async (key) => {
+      const managed = clients.get(key);
+      if (!managed) return;
+      try {
+        await managed.client.close();
+      } catch (err) {
+        logger.warn({ key, err }, 'Error closing MCP client');
+      }
+      clients.delete(key);
+    }),
+  );
 }

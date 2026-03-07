@@ -2,7 +2,12 @@ import { ChildProcess } from 'child_process';
 import { CronExpressionParser } from 'cron-parser';
 import fs from 'fs';
 
-import { ASSISTANT_NAME, SCHEDULER_POLL_INTERVAL, TIMEZONE } from './config.js';
+import {
+  ASSISTANT_NAME,
+  DEFAULT_TENANT_ID,
+  SCHEDULER_POLL_INTERVAL,
+  TIMEZONE,
+} from './config.js';
 import {
   ContainerOutput,
   runContainerAgent,
@@ -82,6 +87,8 @@ async function runTask(
   const startTime = Date.now();
   let groupDir: string;
   try {
+    // Just validate the folder name here; the actual tenant-scoped path
+    // is used later once we look up the group
     groupDir = resolveGroupFolderPath(task.group_folder);
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
@@ -129,6 +136,12 @@ async function runTask(
     return;
   }
 
+  const tenantId = group.tenantId || DEFAULT_TENANT_ID;
+
+  // Re-resolve with tenant-scoped path
+  groupDir = resolveGroupFolderPath(task.group_folder, tenantId);
+  fs.mkdirSync(groupDir, { recursive: true });
+
   // Update tasks snapshot for container to read (filtered by group)
   const isMain = group.isMain === true;
   const tasks = getAllTasks();
@@ -144,6 +157,7 @@ async function runTask(
       status: t.status,
       next_run: t.next_run,
     })),
+    tenantId,
   );
 
   let result: string | null = null;
@@ -178,6 +192,7 @@ async function runTask(
         chatJid: task.chat_jid,
         isMain,
         isScheduledTask: true,
+        tenantId,
         assistantName: ASSISTANT_NAME,
       },
       (proc, containerName) =>

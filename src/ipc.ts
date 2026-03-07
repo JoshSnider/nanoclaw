@@ -14,7 +14,10 @@ import {
 } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
-import { connectAndWriteMcpTools, processSkillRequest } from './mcp-registry.js';
+import {
+  connectAndWriteMcpTools,
+  processSkillRequest,
+} from './mcp-registry.js';
 import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
@@ -28,8 +31,9 @@ export interface IpcDeps {
     isMain: boolean,
     availableGroups: AvailableGroup[],
     registeredJids: Set<string>,
+    tenantId?: string,
   ) => void;
-  writeSkillIndexSnapshot: (groupFolder: string) => void;
+  writeSkillIndexSnapshot: (groupFolder: string, tenantId?: string) => void;
 }
 
 let ipcWatcherRunning = false;
@@ -45,13 +49,55 @@ export function startIpcWatcher(deps: IpcDeps): void {
   fs.mkdirSync(ipcBaseDir, { recursive: true });
 
   const processIpcFiles = async () => {
-    // Scan all group IPC directories (identity determined by directory)
-    let groupFolders: string[];
+    // Scan IPC directories: both flat (data/ipc/{folder}/) for default tenant
+    // and nested (data/ipc/{tenantId}/{folder}/) for non-default tenants
+    interface IpcGroup {
+      sourceGroup: string;
+      tenantId: string;
+      messagesDir: string;
+      tasksDir: string;
+    }
+
+    const ipcGroups: IpcGroup[] = [];
+
     try {
-      groupFolders = fs.readdirSync(ipcBaseDir).filter((f) => {
+      const topEntries = fs.readdirSync(ipcBaseDir).filter((f) => {
         const stat = fs.statSync(path.join(ipcBaseDir, f));
         return stat.isDirectory() && f !== 'errors';
       });
+
+      for (const entry of topEntries) {
+        const entryPath = path.join(ipcBaseDir, entry);
+        // Check if this is a tenant directory (UUID pattern) or a group folder
+        const isUuid =
+          /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
+            entry,
+          );
+
+        if (isUuid) {
+          // Tenant directory — scan one level deeper for group folders
+          const subEntries = fs.readdirSync(entryPath).filter((f) => {
+            const stat = fs.statSync(path.join(entryPath, f));
+            return stat.isDirectory();
+          });
+          for (const groupFolder of subEntries) {
+            ipcGroups.push({
+              sourceGroup: groupFolder,
+              tenantId: entry,
+              messagesDir: path.join(entryPath, groupFolder, 'messages'),
+              tasksDir: path.join(entryPath, groupFolder, 'tasks'),
+            });
+          }
+        } else {
+          // Default tenant — flat layout
+          ipcGroups.push({
+            sourceGroup: entry,
+            tenantId: 'default',
+            messagesDir: path.join(entryPath, 'messages'),
+            tasksDir: path.join(entryPath, 'tasks'),
+          });
+        }
+      }
     } catch (err) {
       logger.error({ err }, 'Error reading IPC base directory');
       setTimeout(processIpcFiles, IPC_POLL_INTERVAL);
@@ -66,10 +112,8 @@ export function startIpcWatcher(deps: IpcDeps): void {
       if (group.isMain) folderIsMain.set(group.folder, true);
     }
 
-    for (const sourceGroup of groupFolders) {
+    for (const { sourceGroup, tenantId, messagesDir, tasksDir } of ipcGroups) {
       const isMain = folderIsMain.get(sourceGroup) === true;
-      const messagesDir = path.join(ipcBaseDir, sourceGroup, 'messages');
-      const tasksDir = path.join(ipcBaseDir, sourceGroup, 'tasks');
 
       // Process messages from this group's IPC directory
       try {
@@ -83,11 +127,15 @@ export function startIpcWatcher(deps: IpcDeps): void {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
               if (data.type === 'message' && data.chatJid && data.text) {
                 // Authorization: verify this group can send to this chatJid
+                // Tenant isolation: non-operator tenants can only message their own groups
                 const targetGroup = registeredGroups[data.chatJid];
-                if (
-                  isMain ||
-                  (targetGroup && targetGroup.folder === sourceGroup)
-                ) {
+                const sameFolder =
+                  targetGroup && targetGroup.folder === sourceGroup;
+                const sameTenant =
+                  !targetGroup ||
+                  !targetGroup.tenantId ||
+                  targetGroup.tenantId === tenantId;
+                if ((isMain || sameFolder) && sameTenant) {
                   await deps.sendMessage(data.chatJid, data.text);
                   logger.info(
                     { chatJid: data.chatJid, sourceGroup },
@@ -133,7 +181,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
               // Pass source group identity to processTaskIpc for authorization
-              await processTaskIpc(data, sourceGroup, isMain, deps);
+              await processTaskIpc(data, sourceGroup, isMain, deps, tenantId);
               fs.unlinkSync(filePath);
             } catch (err) {
               logger.error(
@@ -189,6 +237,7 @@ export async function processTaskIpc(
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
   deps: IpcDeps,
+  tenantId: string = 'default', // Tenant identity from IPC directory path
 ): Promise<void> {
   const registeredGroups = deps.registeredGroups();
 
@@ -420,6 +469,7 @@ export async function processTaskIpc(
           true,
           availableGroups,
           new Set(Object.keys(registeredGroups)),
+          tenantId,
         );
       } else {
         logger.warn(
@@ -454,6 +504,7 @@ export async function processTaskIpc(
           added_at: new Date().toISOString(),
           containerConfig: data.containerConfig,
           requiresTrigger: data.requiresTrigger,
+          tenantId,
         });
       } else {
         logger.warn(
@@ -467,13 +518,14 @@ export async function processTaskIpc(
       if (data.skillName) {
         activateSkill(sourceGroup, data.skillName);
         // Refresh the skill index snapshot so future containers see the update
-        deps.writeSkillIndexSnapshot(sourceGroup);
+        deps.writeSkillIndexSnapshot(sourceGroup, tenantId);
         // Connect MCP server if this is an MCP-backed skill
-        connectAndWriteMcpTools(data.skillName, sourceGroup).catch((err) =>
-          logger.error(
-            { sourceGroup, skill: data.skillName, err },
-            'Failed to connect MCP server on activation',
-          ),
+        connectAndWriteMcpTools(data.skillName, sourceGroup, tenantId).catch(
+          (err) =>
+            logger.error(
+              { sourceGroup, skill: data.skillName, err },
+              'Failed to connect MCP server on activation',
+            ),
         );
         logger.info(
           { sourceGroup, skill: data.skillName },
@@ -493,6 +545,7 @@ export async function processTaskIpc(
           data.operation,
           data.params || {},
           data.requestId,
+          tenantId,
         ).catch((err) =>
           logger.error(
             { sourceGroup, skill: data.skillName, err },

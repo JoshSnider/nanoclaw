@@ -87,7 +87,9 @@ export function registerSkillHandler(
  */
 function readSkillManifest(skillName: string): {
   mcpServer?: McpServerConfig;
-  setup?: { credentials?: Record<string, { description: string }> };
+  setup?: {
+    credentials?: Record<string, { description: string; envFallback?: string }>;
+  };
 } | null {
   const manifestPath = path.join(
     projectRoot,
@@ -102,6 +104,26 @@ function readSkillManifest(skillName: string): {
   } catch {
     return null;
   }
+}
+
+/**
+ * Merge env var fallbacks into a credentials record.
+ * For any credential key that's missing from the DB, checks the manifest's
+ * envFallback field and fills from process.env if available.
+ */
+function applyEnvFallbacks(
+  credentials: Record<string, string>,
+  manifest: ReturnType<typeof readSkillManifest>,
+): Record<string, string> {
+  const fallbacks = manifest?.setup?.credentials;
+  if (!fallbacks) return credentials;
+  const merged = { ...credentials };
+  for (const [key, cfg] of Object.entries(fallbacks)) {
+    if (!merged[key] && cfg.envFallback && process.env[cfg.envFallback]) {
+      merged[key] = process.env[cfg.envFallback]!;
+    }
+  }
+  return merged;
 }
 
 /**
@@ -194,8 +216,12 @@ export async function processSkillRequest(
   operation: string,
   params: Record<string, unknown>,
   requestId: string,
+  tenantId?: string,
 ): Promise<void> {
-  const responsesDir = path.join(resolveGroupIpcPath(groupFolder), 'responses');
+  const responsesDir = path.join(
+    resolveGroupIpcPath(groupFolder, tenantId),
+    'responses',
+  );
   fs.mkdirSync(responsesDir, { recursive: true });
   const responsePath = path.join(responsesDir, `${requestId}.json`);
 
@@ -226,13 +252,14 @@ export async function processSkillRequest(
       }
 
       // Ensure MCP client is connected (lazy connect on first tool call)
-      if (!hasMcpClient(skillName)) {
-        const credentials = getSkillCredentials(groupFolder, skillName);
-        await connectMcpServer(skillName, mcpConfig, credentials);
+      if (!hasMcpClient(skillName, tenantId)) {
+        const rawCredentials = getSkillCredentials(groupFolder, skillName);
+        const credentials = applyEnvFallbacks(rawCredentials, manifest);
+        await connectMcpServer(skillName, mcpConfig, credentials, tenantId);
       }
 
       // Forward to MCP server
-      const result = await callMcpTool(skillName, operation, params);
+      const result = await callMcpTool(skillName, operation, params, tenantId);
       fs.writeFileSync(
         responsePath,
         JSON.stringify({ success: true, result }, null, 2),
@@ -301,11 +328,13 @@ export async function processSkillRequest(
 export async function connectAndWriteMcpTools(
   skillName: string,
   groupFolder: string,
+  tenantId?: string,
 ): Promise<void> {
   const manifest = readSkillManifest(skillName);
   if (!manifest?.mcpServer) return; // Not an MCP-backed skill
 
-  const credentials = getSkillCredentials(groupFolder, skillName);
+  const rawCredentials = getSkillCredentials(groupFolder, skillName);
+  const credentials = applyEnvFallbacks(rawCredentials, manifest);
 
   // Need credentials to connect — skip if not yet configured
   const mcpConfig = manifest.mcpServer;
@@ -323,10 +352,18 @@ export async function connectAndWriteMcpTools(
   }
 
   try {
-    const tools = await connectMcpServer(skillName, mcpConfig, credentials);
+    const tools = await connectMcpServer(
+      skillName,
+      mcpConfig,
+      credentials,
+      tenantId,
+    );
 
     // Write discovered tools to IPC so the container's skills-mcp-server can read them
-    const toolsDir = path.join(resolveGroupIpcPath(groupFolder), 'skill_tools');
+    const toolsDir = path.join(
+      resolveGroupIpcPath(groupFolder, tenantId),
+      'skill_tools',
+    );
     fs.mkdirSync(toolsDir, { recursive: true });
     fs.writeFileSync(
       path.join(toolsDir, `${skillName}.json`),

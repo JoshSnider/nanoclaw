@@ -19,6 +19,7 @@ describe('group folder validation', () => {
     expect(isValidGroupFolder('../../etc')).toBe(false);
     expect(isValidGroupFolder('/tmp')).toBe(false);
     expect(isValidGroupFolder('global')).toBe(false);
+    expect(isValidGroupFolder('_tenants')).toBe(false);
     expect(isValidGroupFolder('')).toBe(false);
   });
 
@@ -39,5 +40,33 @@ describe('group folder validation', () => {
   it('throws for unsafe folder names', () => {
     expect(() => resolveGroupFolderPath('../../etc')).toThrow();
     expect(() => resolveGroupIpcPath('/tmp')).toThrow();
+  });
+
+  it('resolves tenant-scoped group paths', () => {
+    const tenantId = '12345678-1234-1234-1234-123456789abc';
+    const resolved = resolveGroupFolderPath('my-group', tenantId);
+    expect(resolved).toContain(tenantId);
+    expect(resolved).toContain('my-group');
+  });
+
+  it('resolves tenant-scoped IPC paths', () => {
+    const tenantId = '12345678-1234-1234-1234-123456789abc';
+    const resolved = resolveGroupIpcPath('my-group', tenantId);
+    expect(resolved).toContain(tenantId);
+    expect(resolved).toContain('my-group');
+  });
+
+  it('default tenant uses flat path (backward compat)', () => {
+    const resolved = resolveGroupFolderPath('my-group', 'default');
+    expect(resolved.endsWith(`${path.sep}groups${path.sep}my-group`)).toBe(
+      true,
+    );
+    // No 'default' segment in path
+    expect(resolved).not.toContain(`${path.sep}default${path.sep}`);
+  });
+
+  it('throws for invalid tenant ID', () => {
+    expect(() => resolveGroupFolderPath('my-group', 'bad-tenant')).toThrow();
+    expect(() => resolveGroupIpcPath('my-group', '../escape')).toThrow();
   });
 });
