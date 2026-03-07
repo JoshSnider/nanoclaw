@@ -60,6 +60,75 @@ const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
 const SHARED_CLAUDE_MD = '/workspace/shared/CLAUDE.md';
 
+const GLOBAL_STREAMING_CONFIG = '/workspace/shared/streaming_config.json';
+const GROUP_STREAMING_CONFIG = '/workspace/ipc/streaming_config.json';
+
+interface StreamingConfig { thinking: boolean; toolCalls: boolean; }
+
+function loadStreamingConfig(): StreamingConfig {
+  const defaults: StreamingConfig = { thinking: true, toolCalls: true };
+  let config = { ...defaults };
+
+  // Read global config
+  try {
+    const global = JSON.parse(fs.readFileSync(GLOBAL_STREAMING_CONFIG, 'utf-8'));
+    if (typeof global.thinking === 'boolean') config.thinking = global.thinking;
+    if (typeof global.toolCalls === 'boolean') config.toolCalls = global.toolCalls;
+  } catch { /* file may not exist */ }
+
+  // Overlay per-group config
+  try {
+    const group = JSON.parse(fs.readFileSync(GROUP_STREAMING_CONFIG, 'utf-8'));
+    if (typeof group.thinking === 'boolean') config.thinking = group.thinking;
+    if (typeof group.toolCalls === 'boolean') config.toolCalls = group.toolCalls;
+  } catch { /* file may not exist */ }
+
+  return config;
+}
+
+const IPC_MESSAGES_DIR = '/workspace/ipc/messages';
+
+function sendStreamingMessage(chatJid: string, groupFolder: string, text: string): void {
+  fs.mkdirSync(IPC_MESSAGES_DIR, { recursive: true });
+  const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`;
+  const filepath = path.join(IPC_MESSAGES_DIR, filename);
+  const tempPath = `${filepath}.tmp`;
+  fs.writeFileSync(tempPath, JSON.stringify({
+    type: 'message',
+    chatJid,
+    text,
+    groupFolder,
+    timestamp: new Date().toISOString(),
+  }));
+  fs.renameSync(tempPath, filepath);
+}
+
+/** Extract a short summary for a tool_use block */
+function summarizeToolCall(toolName: string, input: Record<string, unknown>): string | null {
+  // Skip tools that already send visible messages
+  if (toolName === 'mcp__nanoclaw__send_message' || toolName === 'mcp__nanoclaw__set_streaming') return null;
+
+  const keyArgMap: Record<string, string> = {
+    Read: 'file_path',
+    Edit: 'file_path',
+    Write: 'file_path',
+    Bash: 'command',
+    Grep: 'pattern',
+    Glob: 'pattern',
+    WebSearch: 'query',
+    WebFetch: 'url',
+  };
+
+  const argKey = keyArgMap[toolName];
+  if (argKey && input[argKey]) {
+    let value = String(input[argKey]);
+    if (toolName === 'Bash' && value.length > 100) value = value.slice(0, 100) + '…';
+    return `_${toolName}: ${value}_`;
+  }
+
+  return `_${toolName}_`;
+}
+
 // Track mtime of shared CLAUDE.md for mid-session change detection
 let sharedClaudeMdMtime = 0;
 
@@ -501,6 +570,28 @@ async function runQuery(
 
     if (message.type === 'assistant' && 'uuid' in message) {
       lastAssistantUuid = (message as { uuid: string }).uuid;
+    }
+
+    // Stream thinking and tool calls via IPC
+    if (message.type === 'assistant' && 'message' in message) {
+      const assistantMsg = message as { message: { content: Array<{ type: string; thinking?: string; name?: string; input?: Record<string, unknown> }> } };
+      const config = loadStreamingConfig();
+
+      for (const block of assistantMsg.message.content) {
+        if (config.thinking && block.type === 'thinking' && block.thinking) {
+          let text = block.thinking.trim();
+          if (!text) continue;
+          if (text.length > 500) text = text.slice(0, 500) + '…';
+          sendStreamingMessage(containerInput.chatJid, containerInput.groupFolder, `_thinking: ${text}_`);
+        }
+
+        if (config.toolCalls && block.type === 'tool_use' && block.name) {
+          const summary = summarizeToolCall(block.name, (block.input || {}) as Record<string, unknown>);
+          if (summary) {
+            sendStreamingMessage(containerInput.chatJid, containerInput.groupFolder, summary);
+          }
+        }
+      }
     }
 
     if (message.type === 'system' && message.subtype === 'init') {

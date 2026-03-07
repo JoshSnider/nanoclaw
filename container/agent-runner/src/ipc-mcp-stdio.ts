@@ -524,6 +524,50 @@ If the skill is already active, this just returns the documentation.`,
   },
 );
 
+server.tool(
+  'set_streaming',
+  'Toggle streaming of your thinking and tool calls to the chat. Controls how chatty you appear. Only affects this group unless scope is "global".',
+  {
+    thinking: z.boolean().optional().describe('Stream thinking blocks to chat'),
+    tool_calls: z.boolean().optional().describe('Stream tool call summaries to chat'),
+    scope: z.enum(['group', 'global']).default('group').describe('group=this chat only, global=all chats'),
+  },
+  async (args) => {
+    const configPath = args.scope === 'global'
+      ? '/workspace/shared/streaming_config.json'
+      : '/workspace/ipc/streaming_config.json';
+
+    // Global scope requires write access to /workspace/shared/
+    if (args.scope === 'global' && !isMain) {
+      return {
+        content: [{ type: 'text' as const, text: 'Only the main group can change global streaming settings.' }],
+        isError: true,
+      };
+    }
+
+    // Read existing config, merge provided fields
+    let config: Record<string, boolean> = {};
+    try {
+      config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    } catch { /* file may not exist */ }
+
+    if (args.thinking !== undefined) config.thinking = args.thinking;
+    if (args.tool_calls !== undefined) config.toolCalls = args.tool_calls;
+
+    // Atomic write
+    const tempPath = `${configPath}.tmp`;
+    fs.writeFileSync(tempPath, JSON.stringify(config, null, 2));
+    fs.renameSync(tempPath, configPath);
+
+    const thinkingStatus = config.thinking !== false ? 'ON' : 'OFF';
+    const toolCallsStatus = config.toolCalls !== false ? 'ON' : 'OFF';
+
+    return {
+      content: [{ type: 'text' as const, text: `Streaming updated (${args.scope}): thinking=${thinkingStatus}, tool_calls=${toolCallsStatus}` }],
+    };
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);
