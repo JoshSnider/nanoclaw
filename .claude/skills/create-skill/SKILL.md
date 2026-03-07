@@ -1,12 +1,86 @@
 # /create-skill
 
-Create a new MCP-backed skill that gives agents access to any third-party service — without exposing credentials to the container.
+Create a new skill that gives agents access to any third-party service or API — without exposing credentials to the container.
 
-## Architecture Recap
+## Critical: How Skills Work (read this first)
 
-Each skill has two parts:
-1. **Container side** — `manifest.json` + `SKILL.md` in `container/skills/{name}/`. The skills proxy MCP server reads these at startup and exposes tools like `mcp__skills__{name}__{operation}`.
-2. **Host side** — a handler module in `src/skill-handlers/{name}.ts`. It's called by `src/mcp-registry.ts` when the agent invokes a skill tool. Credentials are read from the DB; the container never sees them.
+The skills system IS the way to integrate external services into NanoClaw. Agents run in sandboxed containers. Credentials (API keys, OAuth tokens) must NEVER enter the container. The skills system enforces this — the host holds credentials and proxies all external calls.
+
+### Three integration modes (in order of preference)
+
+**1. Remote MCP server (preferred, zero-code)**
+The service hosts its own MCP server (e.g., Vercel, Stripe). The host acts as an authenticating proxy — it injects credentials and forwards requests. No local processes, no dependencies, no code.
+
+```json
+{
+  "name": "vercel",
+  "description": "Vercel deployments and logs",
+  "mcpServer": {
+    "url": "https://mcp.vercel.com/sse",
+    "auth": { "bearer": "token" }
+  }
+}
+```
+
+**2. Local MCP server (zero-code)**
+The service publishes an MCP package but doesn't host it. The host spawns it as a child process via `npx`, injecting credentials as env vars. Each MCP server runs in its own process — no dependency contamination, no changes to host's `package.json`.
+
+```json
+{
+  "name": "some-tool",
+  "description": "Some tool integration",
+  "mcpServer": {
+    "command": "npx",
+    "args": ["-y", "@some/mcp-server"],
+    "env": { "API_KEY": "api_key" }
+  }
+}
+```
+
+**3. Custom handler.js (last resort, for services with no MCP server)**
+Only when the service has no MCP server at all. Write a `handler.js` that calls the API directly from the host. This is the most work — avoid it if an MCP server exists.
+
+```
+┌─────────────────────────────────────┐
+│  Container (sandboxed)              │
+│                                     │
+│  Agent calls vercel__list_projects  │
+│       │                             │
+│       ▼                             │
+│  skills-mcp-server (dumb proxy)     │
+│  writes IPC file to /workspace/ipc  │
+│  polls for response file            │
+│       │                             │
+└───────┼─────────────────────────────┘
+        │ IPC (filesystem)
+┌───────┼─────────────────────────────┐
+│  Host │                             │
+│       ▼                             │
+│  mcp-registry.ts                    │
+│  ├─ mode 1: proxy to remote MCP    │
+│  ├─ mode 2: proxy to local MCP     │
+│  └─ mode 3: run handler.js         │
+│  (all read credentials from DB)    │
+│  writes response to IPC             │
+└─────────────────────────────────────┘
+```
+
+In all three modes, credential values in the manifest (e.g., `"token"`, `"api_key"`) reference keys in the skill's credential store. The agent calls `{name}__setup` to store them. The host resolves them from DB before connecting.
+
+### Do NOT
+
+- **Run MCP servers inside the container** — this would expose credentials to the agent, defeating the entire security model
+- **Modify `agent-runner/src/index.ts`** to add MCP server configs — the skills system already handles this
+- **Duplicate the proxy system** — don't create parallel mechanisms for registering tools; use the existing manifest + handler pattern
+- **Require a service restart** — handlers are lazy-loaded on first use, no rebuild or restart needed
+- **Write a handler.js when an MCP server exists** — always prefer remote > local MCP > custom handler
+
+### Architecture Summary
+
+Each skill lives in `container/skills/{name}/` and requires:
+1. **`manifest.json`** — declares the MCP server config (remote URL or local command) OR operation schemas for custom handlers. Also declares a `setup` operation for credential collection.
+2. **`SKILL.md`** — agent-facing docs, shown when agent calls `load_skill("{name}")`.
+3. **`handler.js`** (only for mode 3) — host-side handler (plain ESM). Called by `src/mcp-registry.ts` with credentials from the DB. Drop the file and it works — no build, no restart.
 
 ### Key Files
 
@@ -14,12 +88,12 @@ Each skill has two parts:
 |------|---------|
 | `container/skills/{name}/manifest.json` | Declares operations + param schemas |
 | `container/skills/{name}/SKILL.md` | Agent-facing docs (shown on `load_skill`) |
-| `src/skill-handlers/{name}.ts` | Host-side handler (auto-loaded at startup from `dist/skill-handlers/`) |
+| `container/skills/{name}/handler.js` | Host-side handler — plain ESM, no build needed |
 | `src/mcp-registry.ts` | `registerSkillHandler()`, `loadSkillHandlers()`, `processSkillRequest()` |
 | `src/db.ts` | `getSkillCredentials()`, `setSkillCredential()`, `activateSkill()`, `getActiveSkills()` |
 | `src/ipc.ts` | Processes `skill_request` IPC messages, routes to handlers |
 | `src/container-runner.ts` | `writeSkillIndexSnapshot()`, `SkillManifest` interface |
-| `container/agent-runner/src/skills-mcp-server.ts` | Container-side MCP server (registers tools from manifests) |
+| `container/agent-runner/src/skills-mcp-server.ts` | Container-side dumb proxy (reads manifests, writes IPC) |
 | `container/agent-runner/src/ipc-mcp-stdio.ts` | Provides `list_skills` and `load_skill` tools to agent |
 
 ### Data Flow
@@ -31,51 +105,111 @@ Agent calls load_skill("name")
 Agent calls name__operation(params)
   -> skills-mcp-server.ts writes IPC skill_request
   -> host ipc.ts reads task -> mcp-registry.ts processSkillRequest()
-  -> looks up handler, reads credentials from DB, executes handler
+  -> lazy-loads container/skills/{name}/handler.js if not yet loaded
+  -> reads credentials from DB, executes handler
   -> writes response to ipc/{group}/responses/{requestId}.json
   -> skills-mcp-server.ts polls for response, returns to agent
 ```
 
-### Key Interfaces (from mcp-registry.ts)
+### SkillOperationContext
 
-```typescript
-interface SkillOperationContext {
-  groupFolder: string;
-  credentials: Record<string, string>;  // from mcp_credentials table
+```javascript
+ctx = {
+  groupFolder,                          // group identifier
+  credentials,                          // { key: value } from DB for this skill
+  setCredential(key, value),            // store a credential (use in setup)
 }
-type SkillHandler = (params: Record<string, unknown>, ctx: SkillOperationContext) => Promise<unknown>;
 ```
 
 ### Notes
-- `src/skill-handlers/` is created on-demand (may not exist yet)
-- Handler files are auto-loaded: `loadSkillHandlers()` imports all `.js` from `dist/skill-handlers/`
+- No build step required — `handler.js` is lazy-loaded on first use
 - Tool naming convention: `{skillName}__{operationName}` (double underscore)
 - Credentials never leave host; container only sees operation results
 - Per-group credential isolation via `(groupFolder, skillName)` composite key
-- Param types: `"string"`, `"number"`, `"boolean"`
+- Param types in manifest: `"string"`, `"number"`, `"boolean"`
 
 ## Steps
 
 ### 1. Gather requirements
 
 Ask the user:
-- What service do they want to integrate? (email, GitHub, Linear, Jira, Slack, etc.)
-- What operations do they need? (e.g., read email, send email, search)
-- What credentials are required? (API key, username+password, OAuth token, etc.)
+- What service do they want to integrate?
+- What credentials are required? (API key, OAuth token, etc.)
 
-### 2. Create the skill directory in container/skills/
+Then determine the integration mode:
+- **Does the service host an MCP server?** (check their docs) → Mode 1 (remote)
+- **Is there an MCP npm package?** (e.g., `@vercel/mcp`) → Mode 2 (local)
+- **Neither?** → Mode 3 (custom handler.js)
+
+Always prefer mode 1 > 2 > 3.
+
+### 2. Create the skill directory
 
 ```bash
 mkdir -p container/skills/{name}
 ```
 
-#### Write `container/skills/{name}/manifest.json`
+### 3. Write the manifest
+
+#### Mode 1: Remote MCP server
 
 ```json
 {
   "name": "{name}",
-  "description": "One-line description for the skill index",
+  "description": "One-line description",
+  "mcpServer": {
+    "url": "https://mcp.example.com/sse",
+    "auth": { "bearer": "token" }
+  },
+  "setup": {
+    "credentials": {
+      "token": { "description": "API access token", "instructions": "Get yours at https://example.com/settings/tokens" }
+    }
+  }
+}
+```
+
+That's it. No handler.js. No operations list. Tools are discovered automatically from the remote MCP server.
+
+#### Mode 2: Local MCP server
+
+```json
+{
+  "name": "{name}",
+  "description": "One-line description",
+  "mcpServer": {
+    "command": "npx",
+    "args": ["-y", "@example/mcp-server"],
+    "env": { "API_KEY": "api_key" }
+  },
+  "setup": {
+    "credentials": {
+      "api_key": { "description": "API key", "instructions": "Get yours at https://example.com/api-keys" }
+    }
+  }
+}
+```
+
+Also no handler.js. The host spawns the process with credentials injected as env vars. `npx -y` handles downloading — no changes to host's `package.json`.
+
+Env values (e.g., `"api_key"`) reference keys in the skill's credential store.
+
+#### Mode 3: Custom handler (last resort)
+
+Only when no MCP server exists. Declare operations manually:
+
+```json
+{
+  "name": "{name}",
+  "description": "One-line description",
   "operations": [
+    {
+      "name": "setup",
+      "description": "Store credentials (one-time setup)",
+      "params": {
+        "api_key": { "type": "string", "description": "Your API key" }
+      }
+    },
     {
       "name": "operation_name",
       "description": "What this operation does",
@@ -90,107 +224,83 @@ mkdir -p container/skills/{name}
 
 Param types: `"string"`, `"number"`, `"boolean"`. Mark optional params with `"optional": true`.
 
-#### Write `container/skills/{name}/SKILL.md`
+### 4. Write SKILL.md
 
-This is what agents see when they call `load_skill("{name}")`. Include:
+Write `container/skills/{name}/SKILL.md` — what agents see when they call `load_skill("{name}")`. Include:
 - When to use this skill
 - What each operation does and when to use it
 - Any important caveats (rate limits, formats, etc.)
 - Example usage
 
-### 3. Create the host-side handler in src/skill-handlers/
+For modes 1 and 2, tools are auto-discovered from the MCP server, so SKILL.md is mainly for guidance and tips.
 
-```bash
-mkdir -p src/skill-handlers
-```
+### 5. Write handler.js (mode 3 only)
 
-Write `src/skill-handlers/{name}.ts`:
+Create `container/skills/{name}/handler.js` — plain ESM, no build needed:
 
-```typescript
+```javascript
 /**
  * Host-side handler for the {name} skill.
- * Credentials are read from the DB — never exposed to containers.
+ * Plain ESM — no build step. Credentials never exposed to containers.
  */
-import { registerSkillHandler } from '../mcp-registry.js';
 
-registerSkillHandler('{name}', 'operation_name', async (params, ctx) => {
-  const { credentials, groupFolder } = ctx;
-  // credentials = { key: value } from mcp_credentials table for this group+skill
+export default {
 
-  // Install any needed npm packages: npm install {package}
-  // const client = new SomeClient({ apiKey: credentials.api_key });
-  // const result = await client.doSomething(params.param1 as string);
-  // return result;
+  async setup(params, ctx) {
+    if (!params.api_key) throw new Error('api_key is required');
+    ctx.setCredential('api_key', params.api_key);
+    return 'Credentials stored.';
+  },
 
-  throw new Error('Handler not yet implemented');
-});
+  async operation_name(params, ctx) {
+    const { api_key } = ctx.credentials;
+    if (!api_key) throw new Error('Not configured. Run {name}__setup first.');
+
+    const res = await fetch('https://api.example.com/endpoint', {
+      headers: { Authorization: `Bearer ${api_key}` },
+    });
+    if (!res.ok) throw new Error(`API error ${res.status}`);
+    return res.json();
+  },
+
+};
 ```
 
-### 4. Install required npm packages (if any)
+The default export is an object keyed by operation name. Each value is an async function `(params, ctx) => result`. The registry auto-registers them on first invocation — no imports, no build.
 
-```bash
-npm install {package-name}
-```
+#### SkillOperationContext (mode 3)
 
-### 5. Store credentials for the group
-
-Use the `mcp_credentials` table via the DB functions. The agent can collect credentials from the user and store them via an IPC message.
-
-Add a `setup` operation to the manifest that the agent can call to store credentials:
-
-```typescript
-registerSkillHandler('{name}', 'setup', async (params, ctx) => {
-  const { groupFolder } = ctx;
-  // Import and call setSkillCredential directly
-  const { setSkillCredential } = await import('../db.js');
-  const credentials = params as Record<string, string>;
-  for (const [key, value] of Object.entries(credentials)) {
-    setSkillCredential(groupFolder, '{name}', key, value as string);
-  }
-  return 'Credentials stored successfully.';
-});
-```
-
-Add a corresponding `setup` operation to `manifest.json`:
-```json
-{
-  "name": "setup",
-  "description": "Store credentials for this skill (one-time setup)",
-  "params": {
-    "api_key": { "type": "string", "description": "Your API key" }
-  }
+```javascript
+ctx = {
+  groupFolder,                          // group identifier
+  credentials,                          // { key: value } from DB for this skill
+  setCredential(key, value),            // store a credential (use in setup)
 }
 ```
 
-### 6. Rebuild the host service
+### 6. Activate and test
 
-```bash
-npm run build && launchctl kickstart -k gui/$(id -u)/com.nanoclaw  # macOS
-# OR
-npm run build && systemctl --user restart nanoclaw                  # Linux
+The skill appears in `list_skills` immediately. The agent activates it with:
+
+```
+load_skill("{name}")
 ```
 
-The new skill handler is now loaded automatically on startup via `loadSkillHandlers()`.
+Then calls `{name}__setup` to store credentials. For modes 1 and 2, tools are available immediately after setup. For mode 3, tool calls go through the handler.js.
 
-### 7. Activate the skill for the group
+## Example: Vercel Skill
 
-The skill will appear in `list_skills` output immediately (it reads `container/skills/` at container startup). The agent (or user) can activate it with `load_skill("{name}")`.
+See `container/skills/vercel/` for a complete example (currently mode 3, migrating to mode 1):
+- `manifest.json` — declares operations
+- `SKILL.md` — agent-facing docs
+- `handler.js` — uses `fetch` against the Vercel REST API
 
-### 8. Test it
-
-Ask the agent to call `list_skills`, then `load_skill("{name}")`, then test an operation. If the handler throws, the error is returned to the agent as a tool error — useful for debugging.
-
-## Example: Email Skill
-
-For a complete example, see how the email skill is structured:
-- `container/skills/email/manifest.json` — declares `read`, `send`, `search`, `setup` operations
-- `container/skills/email/SKILL.md` — agent-facing docs
-- `src/skill-handlers/email.ts` — uses `imap` + `nodemailer` packages, reads IMAP/SMTP creds from DB
+Once migrated to mode 1, this becomes just a manifest with `"url": "https://mcp.vercel.com/sse"` and a SKILL.md — no handler.js.
 
 ## Tips
 
-- **Keep operations focused** — one thing per operation, clear param names
-- **Return structured data** as JSON strings so agents can parse results
-- **Use the `setup` pattern** for credential collection — agent walks user through it interactively
-- **Test locally first** — `node dist/skill-handlers/{name}.js` won't work standalone, but you can test via the agent
-- **Credential keys** — use descriptive names like `imap_host`, `imap_port`, `imap_user`, `imap_password`
+- **Always check for an existing MCP server first** — most major services have one
+- **Remote > local > custom** — less code = fewer bugs = easier maintenance
+- **Use the `setup` pattern** — agent walks user through credential collection interactively
+- **Credential keys** — use descriptive names like `api_key`, `token`, `oauth_token`
+- **For mode 3:** keep operations focused, return plain objects/arrays, use `ctx.setCredential`/`ctx.credentials`

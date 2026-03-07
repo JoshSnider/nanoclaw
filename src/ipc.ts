@@ -14,7 +14,7 @@ import {
 } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
-import { processSkillRequest } from './mcp-registry.js';
+import { connectAndWriteMcpTools, processSkillRequest } from './mcp-registry.js';
 import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
@@ -468,6 +468,13 @@ export async function processTaskIpc(
         activateSkill(sourceGroup, data.skillName);
         // Refresh the skill index snapshot so future containers see the update
         deps.writeSkillIndexSnapshot(sourceGroup);
+        // Connect MCP server if this is an MCP-backed skill
+        connectAndWriteMcpTools(data.skillName, sourceGroup).catch((err) =>
+          logger.error(
+            { sourceGroup, skill: data.skillName, err },
+            'Failed to connect MCP server on activation',
+          ),
+        );
         logger.info(
           { sourceGroup, skill: data.skillName },
           'Skill activated via IPC',

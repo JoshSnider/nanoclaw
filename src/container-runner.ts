@@ -304,8 +304,12 @@ function buildContainerArgs(
 
   // Pass git identity so container agents can commit without manual config
   try {
-    const name = execFileSync('git', ['config', 'user.name'], { encoding: 'utf-8' }).trim();
-    const email = execFileSync('git', ['config', 'user.email'], { encoding: 'utf-8' }).trim();
+    const name = execFileSync('git', ['config', 'user.name'], {
+      encoding: 'utf-8',
+    }).trim();
+    const email = execFileSync('git', ['config', 'user.email'], {
+      encoding: 'utf-8',
+    }).trim();
     if (name) {
       args.push('-e', `GIT_AUTHOR_NAME=${name}`);
       args.push('-e', `GIT_COMMITTER_NAME=${name}`);
@@ -766,6 +770,8 @@ export interface SkillIndexEntry {
   name: string;
   description: string;
   active: boolean;
+  /** True if this skill is backed by an MCP server (tools discovered at runtime). */
+  hasMcpServer?: boolean;
 }
 
 /**
@@ -790,13 +796,14 @@ export function writeSkillIndexSnapshot(groupFolder: string): void {
       const manifestPath = path.join(skillsSrc, skillDir, 'manifest.json');
       if (!fs.existsSync(manifestPath)) continue;
       try {
-        const manifest: SkillManifest = JSON.parse(
+        const manifest = JSON.parse(
           fs.readFileSync(manifestPath, 'utf-8'),
         );
         entries.push({
           name: manifest.name,
           description: manifest.description,
           active: activeSkills.has(manifest.name),
+          hasMcpServer: !!(manifest.mcpServer),
         });
       } catch (err) {
         logger.warn({ skillDir, err }, 'Failed to parse skill manifest');

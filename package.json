@@ -19,6 +19,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
     "@octokit/rest": "^22.0.1",
     "@slack/bolt": "^4.6.0",
     "@types/qrcode-terminal": "^0.12.0",

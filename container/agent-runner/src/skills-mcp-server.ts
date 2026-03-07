@@ -2,19 +2,22 @@
  * Skills Proxy MCP Server
  *
  * Runs inside the container as a stdio MCP server.
- * Reads the skill index to discover active skills, then for each active skill
- * reads its manifest.json and registers MCP tools for its operations.
+ * Reads the skill index to discover active skills, then registers tools:
  *
- * Tool invocations are proxied to the host via IPC:
+ *   - MCP-backed skills (hasMcpServer=true): reads discovered tools from
+ *     /workspace/ipc/skill_tools/{name}.json (written by the host after
+ *     connecting to the remote/local MCP server)
+ *   - Custom handler skills: reads operations from manifest.json
+ *
+ * All tool invocations are proxied to the host via IPC:
  *   1. Write skill_request to /workspace/ipc/tasks/
  *   2. Poll /workspace/ipc/responses/{reqId}.json until host responds
  *   3. Return the result to the agent
  *
- * Credentials never enter the container — the host reads them from the DB
- * and executes the operation, returning only the result.
+ * Credentials never enter the container — the host holds them and
+ * executes operations, returning only results.
  *
- * Tool naming: mcp__skills__{skillName}__{operationName}
- * e.g. mcp__skills__email__send, mcp__skills__github__create_pr
+ * Tool naming: {skillName}__{operationName}
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -27,6 +30,7 @@ const IPC_DIR = '/workspace/ipc';
 const TASKS_DIR = path.join(IPC_DIR, 'tasks');
 const RESPONSES_DIR = path.join(IPC_DIR, 'responses');
 const SKILL_INDEX_FILE = path.join(IPC_DIR, 'skill_index.json');
+const SKILL_TOOLS_DIR = path.join(IPC_DIR, 'skill_tools');
 const SKILLS_DIR = '/home/node/.claude/skills';
 
 const groupFolder = process.env.NANOCLAW_GROUP_FOLDER!;
@@ -38,6 +42,7 @@ interface SkillIndexEntry {
   name: string;
   description: string;
   active: boolean;
+  hasMcpServer?: boolean;
 }
 
 interface SkillParam {
@@ -52,10 +57,14 @@ interface SkillOperation {
   params?: Record<string, SkillParam>;
 }
 
-interface SkillManifest {
+interface DiscoveredTool {
   name: string;
-  description: string;
-  operations: SkillOperation[];
+  description?: string;
+  inputSchema?: {
+    type?: string;
+    properties?: Record<string, { type?: string; description?: string }>;
+    required?: string[];
+  };
 }
 
 function writeIpcFile(dir: string, data: object): string {
@@ -148,6 +157,76 @@ function buildParamSchema(
   return z.object(shape);
 }
 
+/**
+ * Build a Zod schema from a JSON Schema (from MCP tool inputSchema).
+ * Handles the common cases for MCP tool parameters.
+ */
+function buildSchemaFromJsonSchema(
+  inputSchema?: DiscoveredTool['inputSchema'],
+): z.ZodObject<Record<string, z.ZodTypeAny>> {
+  const shape: Record<string, z.ZodTypeAny> = {};
+  if (!inputSchema?.properties) return z.object(shape);
+
+  const required = new Set(inputSchema.required || []);
+
+  for (const [name, prop] of Object.entries(inputSchema.properties)) {
+    let schema: z.ZodTypeAny;
+    switch (prop.type) {
+      case 'number':
+      case 'integer':
+        schema = z.number();
+        break;
+      case 'boolean':
+        schema = z.boolean();
+        break;
+      default:
+        schema = z.string();
+    }
+    if (prop.description) {
+      schema = schema.describe(prop.description);
+    }
+    if (!required.has(name)) {
+      schema = schema.optional();
+    }
+    shape[name] = schema;
+  }
+  return z.object(shape);
+}
+
+/**
+ * Register a tool that proxies to the host via IPC.
+ */
+function registerProxyTool(
+  server: McpServer,
+  skillName: string,
+  toolName: string,
+  description: string,
+  schema: z.ZodObject<Record<string, z.ZodTypeAny>>,
+): void {
+  server.tool(
+    `${skillName}__${toolName}`,
+    `[${skillName}] ${description}`,
+    schema.shape,
+    async (args) => {
+      try {
+        const result = await invokeSkillOperation(skillName, toolName, args as Record<string, unknown>);
+        const text = typeof result === 'string'
+          ? result
+          : JSON.stringify(result, null, 2);
+        return { content: [{ type: 'text' as const, text }] };
+      } catch (err) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: `Error: ${err instanceof Error ? err.message : String(err)}`,
+          }],
+          isError: true,
+        };
+      }
+    },
+  );
+}
+
 // Load skill index and active skills
 let activeSkills: SkillIndexEntry[] = [];
 try {
@@ -169,49 +248,98 @@ const server = new McpServer({
 let toolsRegistered = 0;
 
 for (const entry of activeSkills) {
-  const manifestPath = path.join(SKILLS_DIR, entry.name, 'manifest.json');
-  if (!fs.existsSync(manifestPath)) {
-    process.stderr.write(`[skills-mcp] Manifest not found for active skill: ${entry.name}\n`);
-    continue;
-  }
+  if (entry.hasMcpServer) {
+    // MCP-backed skill: read discovered tools from IPC
+    const toolsFile = path.join(SKILL_TOOLS_DIR, `${entry.name}.json`);
+    if (!fs.existsSync(toolsFile)) {
+      process.stderr.write(
+        `[skills-mcp] No discovered tools for MCP skill "${entry.name}" — ` +
+        `run ${entry.name}__setup to configure credentials\n`,
+      );
 
-  let manifest: SkillManifest;
-  try {
-    manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
-  } catch (err) {
-    process.stderr.write(`[skills-mcp] Failed to parse manifest for ${entry.name}: ${err}\n`);
-    continue;
-  }
-
-  for (const op of manifest.operations) {
-    const toolName = `${entry.name}__${op.name}`;
-    const paramSchema = buildParamSchema(op.params);
-
-    server.tool(
-      toolName,
-      `[${entry.name}] ${op.description}`,
-      paramSchema.shape,
-      async (args) => {
+      // Register a setup tool so the agent can configure credentials
+      const manifestPath = path.join(SKILLS_DIR, entry.name, 'manifest.json');
+      if (fs.existsSync(manifestPath)) {
         try {
-          const result = await invokeSkillOperation(entry.name, op.name, args as Record<string, unknown>);
-          const text = typeof result === 'string'
-            ? result
-            : JSON.stringify(result, null, 2);
-          return { content: [{ type: 'text' as const, text }] };
-        } catch (err) {
-          return {
-            content: [{
-              type: 'text' as const,
-              text: `Error: ${err instanceof Error ? err.message : String(err)}`,
-            }],
-            isError: true,
-          };
-        }
-      },
-    );
+          const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+          const setupCreds = manifest.setup?.credentials;
+          if (setupCreds) {
+            const shape: Record<string, z.ZodTypeAny> = {};
+            for (const [key, def] of Object.entries(setupCreds as Record<string, { description: string }>)) {
+              shape[key] = z.string().describe(def.description);
+            }
+            registerProxyTool(
+              server, entry.name, 'setup',
+              'Store credentials (one-time setup)',
+              z.object(shape),
+            );
+            toolsRegistered++;
+            process.stderr.write(`[skills-mcp] Registered setup tool for MCP skill: ${entry.name}\n`);
+          }
+        } catch { /* ignore parse errors */ }
+      }
+      continue;
+    }
 
-    toolsRegistered++;
-    process.stderr.write(`[skills-mcp] Registered tool: ${toolName}\n`);
+    try {
+      const tools: DiscoveredTool[] = JSON.parse(fs.readFileSync(toolsFile, 'utf-8'));
+
+      for (const tool of tools) {
+        const schema = buildSchemaFromJsonSchema(tool.inputSchema);
+        registerProxyTool(
+          server, entry.name, tool.name,
+          tool.description || tool.name,
+          schema,
+        );
+        toolsRegistered++;
+        process.stderr.write(`[skills-mcp] Registered MCP tool: ${entry.name}__${tool.name}\n`);
+      }
+
+      // Also register a setup tool for re-configuration
+      const manifestPath = path.join(SKILLS_DIR, entry.name, 'manifest.json');
+      if (fs.existsSync(manifestPath)) {
+        try {
+          const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+          const setupCreds = manifest.setup?.credentials;
+          if (setupCreds) {
+            const shape: Record<string, z.ZodTypeAny> = {};
+            for (const [key, def] of Object.entries(setupCreds as Record<string, { description: string }>)) {
+              shape[key] = z.string().describe(def.description);
+            }
+            registerProxyTool(
+              server, entry.name, 'setup',
+              'Store or update credentials',
+              z.object(shape),
+            );
+            toolsRegistered++;
+          }
+        } catch { /* ignore */ }
+      }
+    } catch (err) {
+      process.stderr.write(`[skills-mcp] Failed to read discovered tools for ${entry.name}: ${err}\n`);
+    }
+  } else {
+    // Custom handler skill: read operations from manifest
+    const manifestPath = path.join(SKILLS_DIR, entry.name, 'manifest.json');
+    if (!fs.existsSync(manifestPath)) {
+      process.stderr.write(`[skills-mcp] Manifest not found for active skill: ${entry.name}\n`);
+      continue;
+    }
+
+    let manifest: { operations?: SkillOperation[] };
+    try {
+      manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+    } catch (err) {
+      process.stderr.write(`[skills-mcp] Failed to parse manifest for ${entry.name}: ${err}\n`);
+      continue;
+    }
+
+    for (const op of manifest.operations || []) {
+      const paramSchema = buildParamSchema(op.params);
+      registerProxyTool(server, entry.name, op.name, op.description, paramSchema);
+      toolsRegistered++;
+      process.stderr.write(`[skills-mcp] Registered tool: ${entry.name}__${op.name}\n`);
+    }
   }
 }
 
