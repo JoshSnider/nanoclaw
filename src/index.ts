@@ -186,6 +186,17 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     'Processing messages',
   );
 
+  // Send a status message so the user knows what's happening
+  const hasExistingSession = !!sessions[group.folder];
+  const statusMsg = hasExistingSession
+    ? '_Rehydrating session…_'
+    : '_Establishing session…_';
+  channel
+    .sendMessage(chatJid, statusMsg)
+    .catch((err) =>
+      logger.warn({ chatJid, err }, 'Failed to send status message'),
+    );
+
   // Track idle timer for closing stdin when agent is idle
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
 
