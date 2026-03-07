@@ -8,6 +8,52 @@ Each skill has two parts:
 1. **Container side** — `manifest.json` + `SKILL.md` in `container/skills/{name}/`. The skills proxy MCP server reads these at startup and exposes tools like `mcp__skills__{name}__{operation}`.
 2. **Host side** — a handler module in `src/skill-handlers/{name}.ts`. It's called by `src/mcp-registry.ts` when the agent invokes a skill tool. Credentials are read from the DB; the container never sees them.
 
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `container/skills/{name}/manifest.json` | Declares operations + param schemas |
+| `container/skills/{name}/SKILL.md` | Agent-facing docs (shown on `load_skill`) |
+| `src/skill-handlers/{name}.ts` | Host-side handler (auto-loaded at startup from `dist/skill-handlers/`) |
+| `src/mcp-registry.ts` | `registerSkillHandler()`, `loadSkillHandlers()`, `processSkillRequest()` |
+| `src/db.ts` | `getSkillCredentials()`, `setSkillCredential()`, `activateSkill()`, `getActiveSkills()` |
+| `src/ipc.ts` | Processes `skill_request` IPC messages, routes to handlers |
+| `src/container-runner.ts` | `writeSkillIndexSnapshot()`, `SkillManifest` interface |
+| `container/agent-runner/src/skills-mcp-server.ts` | Container-side MCP server (registers tools from manifests) |
+| `container/agent-runner/src/ipc-mcp-stdio.ts` | Provides `list_skills` and `load_skill` tools to agent |
+
+### Data Flow
+
+```
+Agent calls load_skill("name")
+  -> IPC activate_skill -> host activates in DB -> skill_index.json updated
+
+Agent calls name__operation(params)
+  -> skills-mcp-server.ts writes IPC skill_request
+  -> host ipc.ts reads task -> mcp-registry.ts processSkillRequest()
+  -> looks up handler, reads credentials from DB, executes handler
+  -> writes response to ipc/{group}/responses/{requestId}.json
+  -> skills-mcp-server.ts polls for response, returns to agent
+```
+
+### Key Interfaces (from mcp-registry.ts)
+
+```typescript
+interface SkillOperationContext {
+  groupFolder: string;
+  credentials: Record<string, string>;  // from mcp_credentials table
+}
+type SkillHandler = (params: Record<string, unknown>, ctx: SkillOperationContext) => Promise<unknown>;
+```
+
+### Notes
+- `src/skill-handlers/` is created on-demand (may not exist yet)
+- Handler files are auto-loaded: `loadSkillHandlers()` imports all `.js` from `dist/skill-handlers/`
+- Tool naming convention: `{skillName}__{operationName}` (double underscore)
+- Credentials never leave host; container only sees operation results
+- Per-group credential isolation via `(groupFolder, skillName)` composite key
+- Param types: `"string"`, `"number"`, `"boolean"`
+
 ## Steps
 
 ### 1. Gather requirements

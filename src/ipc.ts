@@ -5,7 +5,13 @@ import { CronExpressionParser } from 'cron-parser';
 
 import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { AvailableGroup } from './container-runner.js';
-import { activateSkill, createTask, deleteTask, getTaskById, updateTask } from './db.js';
+import {
+  activateSkill,
+  createTask,
+  deleteTask,
+  getTaskById,
+  updateTask,
+} from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { processSkillRequest } from './mcp-registry.js';
@@ -472,11 +478,7 @@ export async function processTaskIpc(
       break;
 
     case 'skill_request':
-      if (
-        data.skillName &&
-        data.operation &&
-        data.requestId
-      ) {
+      if (data.skillName && data.operation && data.requestId) {
         // Fire-and-forget: response written to ipc/responses/{requestId}.json
         processSkillRequest(
           sourceGroup,
@@ -485,7 +487,10 @@ export async function processTaskIpc(
           data.params || {},
           data.requestId,
         ).catch((err) =>
-          logger.error({ sourceGroup, skill: data.skillName, err }, 'skill_request processing error'),
+          logger.error(
+            { sourceGroup, skill: data.skillName, err },
+            'skill_request processing error',
+          ),
         );
       } else {
         logger.warn({ data }, 'skill_request missing required fields');

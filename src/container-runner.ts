@@ -2,7 +2,7 @@
  * Container Runner for NanoClaw
  * Spawns agent execution in containers and handles IPC
  */
-import { ChildProcess, exec, spawn } from 'child_process';
+import { ChildProcess, exec, execFileSync, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
@@ -301,6 +301,22 @@ function buildContainerArgs(
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
+
+  // Pass git identity so container agents can commit without manual config
+  try {
+    const name = execFileSync('git', ['config', 'user.name'], { encoding: 'utf-8' }).trim();
+    const email = execFileSync('git', ['config', 'user.email'], { encoding: 'utf-8' }).trim();
+    if (name) {
+      args.push('-e', `GIT_AUTHOR_NAME=${name}`);
+      args.push('-e', `GIT_COMMITTER_NAME=${name}`);
+    }
+    if (email) {
+      args.push('-e', `GIT_AUTHOR_EMAIL=${email}`);
+      args.push('-e', `GIT_COMMITTER_EMAIL=${email}`);
+    }
+  } catch {
+    // No git config available — agent will need to set it manually
+  }
 
   // Run as host user so bind-mounted files are accessible.
   // Skip when running as root (uid 0), as the container's node user (uid 1000),
@@ -739,7 +755,10 @@ export interface SkillManifest {
   operations: Array<{
     name: string;
     description: string;
-    params?: Record<string, { type: string; description?: string; optional?: boolean }>;
+    params?: Record<
+      string,
+      { type: string; description?: string; optional?: boolean }
+    >;
   }>;
 }
 

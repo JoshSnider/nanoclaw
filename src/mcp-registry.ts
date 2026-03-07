@@ -45,7 +45,10 @@ export function registerSkillHandler(
 ): void {
   const key = `${skillName}.${operationName}`;
   handlers.set(key, handler);
-  logger.debug({ skill: skillName, operation: operationName }, 'Skill handler registered');
+  logger.debug(
+    { skill: skillName, operation: operationName },
+    'Skill handler registered',
+  );
 }
 
 /**
@@ -67,7 +70,10 @@ export async function processSkillRequest(
   const responsePath = path.join(responsesDir, `${requestId}.json`);
 
   if (!handler) {
-    logger.warn({ groupFolder, skillName, operation, key }, 'No handler registered for skill operation');
+    logger.warn(
+      { groupFolder, skillName, operation, key },
+      'No handler registered for skill operation',
+    );
     const response = {
       success: false,
       error: `No handler registered for ${key}. Has the skill been fully set up? Run /create-skill to configure it.`,
@@ -82,10 +88,16 @@ export async function processSkillRequest(
     const result = await handler(params, ctx);
     const response = { success: true, result };
     fs.writeFileSync(responsePath, JSON.stringify(response, null, 2));
-    logger.info({ groupFolder, skillName, operation }, 'Skill request processed');
+    logger.info(
+      { groupFolder, skillName, operation },
+      'Skill request processed',
+    );
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err);
-    logger.error({ groupFolder, skillName, operation, err }, 'Skill handler error');
+    logger.error(
+      { groupFolder, skillName, operation, err },
+      'Skill handler error',
+    );
     const response = { success: false, error: errorMsg };
     fs.writeFileSync(responsePath, JSON.stringify(response, null, 2));
   }
