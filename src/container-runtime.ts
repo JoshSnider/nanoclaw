@@ -60,28 +60,57 @@ export function ensureContainerRuntimeRunning(): void {
   }
 }
 
-/** Kill orphaned NanoClaw containers from previous runs. */
+/**
+ * Handle containers from previous runs.
+ * Recent containers (< 1 hour) are left alone — they'll finish via their
+ * own idle/hard timeouts and --rm cleans them up. Only truly stale
+ * containers (hours+) are stopped as they likely leaked from a crash.
+ */
 export function cleanupOrphans(): void {
   try {
     const output = execSync(
-      `${CONTAINER_RUNTIME_BIN} ps --filter name=nanoclaw- --format '{{.Names}}'`,
+      `${CONTAINER_RUNTIME_BIN} ps --filter name=nanoclaw- --format '{{.Names}}\t{{.RunningFor}}'`,
       { stdio: ['pipe', 'pipe', 'pipe'], encoding: 'utf-8' },
     );
-    const orphans = output.trim().split('\n').filter(Boolean);
-    for (const name of orphans) {
+    const lines = output.trim().split('\n').filter(Boolean);
+    if (lines.length === 0) return;
+
+    const stale: string[] = [];
+    const active: string[] = [];
+
+    for (const line of lines) {
+      const [name, runningFor] = line.split('\t');
+      if (!name) continue;
+      // Docker formats duration as "X hours", "X minutes", "X seconds", etc.
+      const isStale = /hours|days|weeks|months/.test(runningFor || '');
+      if (isStale) {
+        stale.push(name);
+      } else {
+        active.push(name);
+      }
+    }
+
+    if (active.length > 0) {
+      logger.info(
+        { count: active.length, names: active },
+        'Found running containers from previous process, letting them finish',
+      );
+    }
+
+    for (const name of stale) {
       try {
         execSync(stopContainer(name), { stdio: 'pipe' });
       } catch {
         /* already stopped */
       }
     }
-    if (orphans.length > 0) {
+    if (stale.length > 0) {
       logger.info(
-        { count: orphans.length, names: orphans },
-        'Stopped orphaned containers',
+        { count: stale.length, names: stale },
+        'Stopped stale orphaned containers (running > 1 hour)',
       );
     }
   } catch (err) {
-    logger.warn({ err }, 'Failed to clean up orphaned containers');
+    logger.warn({ err }, 'Failed to check for orphaned containers');
   }
 }

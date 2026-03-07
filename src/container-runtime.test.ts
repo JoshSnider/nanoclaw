@@ -79,35 +79,34 @@ describe('ensureContainerRuntimeRunning', () => {
 // --- cleanupOrphans ---
 
 describe('cleanupOrphans', () => {
-  it('stops orphaned nanoclaw containers', () => {
-    // docker ps returns container names, one per line
+  it('lets recent containers finish and only stops stale ones', () => {
+    // docker ps returns name + running time, tab-separated
     mockExecSync.mockReturnValueOnce(
-      'nanoclaw-group1-111\nnanoclaw-group2-222\n',
+      'nanoclaw-group1-111\t5 minutes ago\nnanoclaw-group2-222\t3 hours ago\n',
     );
-    // stop calls succeed
+    // stop call for stale container succeeds
     mockExecSync.mockReturnValue('');
 
     cleanupOrphans();
 
-    // ps + 2 stop calls
-    expect(mockExecSync).toHaveBeenCalledTimes(3);
+    // ps + 1 stop call (only the stale one)
+    expect(mockExecSync).toHaveBeenCalledTimes(2);
     expect(mockExecSync).toHaveBeenNthCalledWith(
       2,
-      `${CONTAINER_RUNTIME_BIN} stop nanoclaw-group1-111`,
-      { stdio: 'pipe' },
-    );
-    expect(mockExecSync).toHaveBeenNthCalledWith(
-      3,
       `${CONTAINER_RUNTIME_BIN} stop nanoclaw-group2-222`,
       { stdio: 'pipe' },
     );
     expect(logger.info).toHaveBeenCalledWith(
-      { count: 2, names: ['nanoclaw-group1-111', 'nanoclaw-group2-222'] },
-      'Stopped orphaned containers',
+      { count: 1, names: ['nanoclaw-group1-111'] },
+      'Found running containers from previous process, letting them finish',
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      { count: 1, names: ['nanoclaw-group2-222'] },
+      'Stopped stale orphaned containers (running > 1 hour)',
     );
   });
 
-  it('does nothing when no orphans exist', () => {
+  it('does nothing when no containers exist', () => {
     mockExecSync.mockReturnValueOnce('');
 
     cleanupOrphans();
@@ -125,25 +124,22 @@ describe('cleanupOrphans', () => {
 
     expect(logger.warn).toHaveBeenCalledWith(
       expect.objectContaining({ err: expect.any(Error) }),
-      'Failed to clean up orphaned containers',
+      'Failed to check for orphaned containers',
     );
   });
 
-  it('continues stopping remaining containers when one stop fails', () => {
-    mockExecSync.mockReturnValueOnce('nanoclaw-a-1\nnanoclaw-b-2\n');
-    // First stop fails
-    mockExecSync.mockImplementationOnce(() => {
-      throw new Error('already stopped');
-    });
-    // Second stop succeeds
-    mockExecSync.mockReturnValueOnce('');
+  it('lets all recent containers finish without stopping any', () => {
+    mockExecSync.mockReturnValueOnce(
+      'nanoclaw-a-1\t2 minutes ago\nnanoclaw-b-2\t30 seconds ago\n',
+    );
 
-    cleanupOrphans(); // should not throw
+    cleanupOrphans();
 
-    expect(mockExecSync).toHaveBeenCalledTimes(3);
+    // Only the ps call, no stop calls
+    expect(mockExecSync).toHaveBeenCalledTimes(1);
     expect(logger.info).toHaveBeenCalledWith(
       { count: 2, names: ['nanoclaw-a-1', 'nanoclaw-b-2'] },
-      'Stopped orphaned containers',
+      'Found running containers from previous process, letting them finish',
     );
   });
 });

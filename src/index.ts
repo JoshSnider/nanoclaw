@@ -94,6 +94,32 @@ function saveState(): void {
   setRouterState('last_agent_timestamp', JSON.stringify(lastAgentTimestamp));
 }
 
+/**
+ * In-flight tracking: persist which groups have active containers and their
+ * pre-advance cursor value. If the process is killed mid-work, startup
+ * recovery rolls back these cursors so messages get re-processed.
+ */
+function getInFlightGroups(): Record<string, string> {
+  const raw = getRouterState('in_flight_groups');
+  try {
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+function markInFlight(chatJid: string, previousCursor: string): void {
+  const inFlight = getInFlightGroups();
+  inFlight[chatJid] = previousCursor;
+  setRouterState('in_flight_groups', JSON.stringify(inFlight));
+}
+
+function clearInFlight(chatJid: string): void {
+  const inFlight = getInFlightGroups();
+  delete inFlight[chatJid];
+  setRouterState('in_flight_groups', JSON.stringify(inFlight));
+}
+
 function registerGroup(jid: string, group: RegisteredGroup): void {
   let groupDir: string;
   try {
@@ -186,6 +212,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const previousCursor = lastAgentTimestamp[chatJid] || '';
   lastAgentTimestamp[chatJid] =
     missedMessages[missedMessages.length - 1].timestamp;
+  markInFlight(chatJid, previousCursor);
   saveState();
 
   logger.info(
@@ -257,6 +284,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     (err: unknown) =>
       logger.error({ group: group.name, err }, 'Failed to archive session'),
   );
+
+  clearInFlight(chatJid);
 
   if (output === 'error' || hadError) {
     // If we already sent output to the user, don't roll back the cursor —
@@ -688,9 +717,25 @@ async function startMessageLoop(): Promise<void> {
 
 /**
  * Startup recovery: check for unprocessed messages in registered groups.
- * Handles crash between advancing lastTimestamp and processing messages.
+ * Also rolls back cursors for groups that had in-flight containers when
+ * the process was killed (e.g. service restart).
  */
 function recoverPendingMessages(): void {
+  // Roll back cursors for groups that were mid-work when process was killed
+  const inFlight = getInFlightGroups();
+  const inFlightCount = Object.keys(inFlight).length;
+  if (inFlightCount > 0) {
+    for (const [chatJid, previousCursor] of Object.entries(inFlight)) {
+      logger.info(
+        { chatJid, previousCursor },
+        'Recovery: rolling back cursor for interrupted container',
+      );
+      lastAgentTimestamp[chatJid] = previousCursor;
+    }
+    setRouterState('in_flight_groups', '{}');
+    saveState();
+  }
+
   for (const [chatJid, group] of Object.entries(registeredGroups)) {
     const sinceTimestamp = lastAgentTimestamp[chatJid] || '';
     const pending = getMessagesSince(chatJid, sinceTimestamp, ASSISTANT_NAME);
