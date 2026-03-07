@@ -26,6 +26,7 @@ export interface SlackChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
+  onThreadGroup?: (jid: string, group: RegisteredGroup) => void;
 }
 
 export class SlackChannel implements Channel {
@@ -79,20 +80,29 @@ export class SlackChannel implements Channel {
 
       if (!msg.text) return;
 
-      // Threaded replies are flattened into the channel conversation.
-      // The agent sees them alongside channel-level messages; responses
-      // always go to the channel, not back into the thread.
-
-      const jid = `slack:${msg.channel}`;
+      const channelJid = `slack:${msg.channel}`;
       const timestamp = new Date(parseFloat(msg.ts) * 1000).toISOString();
       const isGroup = msg.channel_type !== 'im';
 
-      // Always report metadata for group discovery
-      this.opts.onChatMetadata(jid, timestamp, undefined, 'slack', isGroup);
+      // Always report metadata for channel discovery
+      this.opts.onChatMetadata(
+        channelJid,
+        timestamp,
+        undefined,
+        'slack',
+        isGroup,
+      );
 
-      // Only deliver full messages for registered groups
+      // Thread-based sessions: each thread is its own group/session.
+      // - Top-level message (no thread_ts, or thread_ts === ts): starts a new thread session
+      // - Reply in thread (thread_ts !== ts): routes to existing thread session
+      const threadTs =
+        (msg as GenericMessageEvent).thread_ts || msg.ts;
+      const threadJid = `slack:${msg.channel}:${threadTs}`;
+
+      // Check if the parent channel is registered
       const groups = this.opts.registeredGroups();
-      if (!groups[jid]) return;
+      if (!groups[channelJid]) return;
 
       const isBotMessage = !!msg.bot_id || msg.user === this.botUserId;
 
@@ -107,8 +117,6 @@ export class SlackChannel implements Channel {
       }
 
       // Translate Slack <@UBOTID> mentions into TRIGGER_PATTERN format.
-      // Slack encodes @mentions as <@U12345>, which won't match TRIGGER_PATTERN
-      // (e.g., ^@<ASSISTANT_NAME>\b), so we prepend the trigger when the bot is @mentioned.
       let content = msg.text;
       if (this.botUserId && !isBotMessage) {
         const mentionPattern = `<@${this.botUserId}>`;
@@ -120,9 +128,30 @@ export class SlackChannel implements Channel {
         }
       }
 
-      this.opts.onMessage(jid, {
+      // Auto-register thread as a group if not already registered
+      if (!groups[threadJid] && !isBotMessage) {
+        const parentGroup = groups[channelJid];
+        this.opts.onThreadGroup?.(threadJid, {
+          name: `Thread ${threadTs}`,
+          folder: `slack_thread_${threadTs.replace('.', '-')}`,
+          trigger: parentGroup.trigger,
+          added_at: new Date().toISOString(),
+          requiresTrigger: false,
+        });
+      }
+
+      // Ensure thread JID exists in the chats table (FK target for messages)
+      this.opts.onChatMetadata(
+        threadJid,
+        timestamp,
+        `Thread ${threadTs}`,
+        'slack',
+        isGroup,
+      );
+
+      this.opts.onMessage(threadJid, {
         id: msg.ts,
-        chat_jid: jid,
+        chat_jid: threadJid,
         sender: msg.user || msg.bot_id || '',
         sender_name: senderName,
         content,
@@ -157,7 +186,10 @@ export class SlackChannel implements Channel {
   }
 
   async sendMessage(jid: string, text: string): Promise<void> {
-    const channelId = jid.replace(/^slack:/, '');
+    // Parse thread JID: slack:CHANNEL:THREAD_TS or slack:CHANNEL
+    const parts = jid.replace(/^slack:/, '').split(':');
+    const channelId = parts[0];
+    const threadTs = parts[1]; // undefined for channel-level messages
 
     if (!this.connected) {
       this.outgoingQueue.push({ jid, text });
@@ -169,13 +201,19 @@ export class SlackChannel implements Channel {
     }
 
     try {
+      const postArgs: { channel: string; text: string; thread_ts?: string } = {
+        channel: channelId,
+        text,
+      };
+      if (threadTs) postArgs.thread_ts = threadTs;
+
       // Slack limits messages to ~4000 characters; split if needed
       if (text.length <= MAX_MESSAGE_LENGTH) {
-        await this.app.client.chat.postMessage({ channel: channelId, text });
+        await this.app.client.chat.postMessage(postArgs);
       } else {
         for (let i = 0; i < text.length; i += MAX_MESSAGE_LENGTH) {
           await this.app.client.chat.postMessage({
-            channel: channelId,
+            ...postArgs,
             text: text.slice(i, i + MAX_MESSAGE_LENGTH),
           });
         }
@@ -195,6 +233,7 @@ export class SlackChannel implements Channel {
   }
 
   ownsJid(jid: string): boolean {
+    // Matches both slack:CHANNEL and slack:CHANNEL:THREAD_TS
     return jid.startsWith('slack:');
   }
 

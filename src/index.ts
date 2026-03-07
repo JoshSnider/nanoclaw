@@ -493,11 +493,13 @@ async function main(): Promise<void> {
   const channelOpts = {
     onMessage: (chatJid: string, msg: NewMessage) => {
       // Sender allowlist drop mode: discard messages from denied senders before storing
-      if (!msg.is_from_me && !msg.is_bot_message && registeredGroups[chatJid]) {
+      // For thread JIDs (slack:CHANNEL:THREAD_TS), check against the parent channel JID
+      const allowlistJid = chatJid.replace(/^(slack:[^:]+):.+$/, '$1');
+      if (!msg.is_from_me && !msg.is_bot_message && (registeredGroups[chatJid] || registeredGroups[allowlistJid])) {
         const cfg = loadSenderAllowlist();
         if (
-          shouldDropMessage(chatJid, cfg) &&
-          !isSenderAllowed(chatJid, msg.sender, cfg)
+          shouldDropMessage(allowlistJid, cfg) &&
+          !isSenderAllowed(allowlistJid, msg.sender, cfg)
         ) {
           if (cfg.logDenied) {
             logger.debug(
@@ -518,6 +520,9 @@ async function main(): Promise<void> {
       isGroup?: boolean,
     ) => storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
     registeredGroups: () => registeredGroups,
+    onThreadGroup: (jid: string, group: RegisteredGroup) => {
+      registerGroup(jid, group);
+    },
   };
 
   // Create and connect all registered channels.
