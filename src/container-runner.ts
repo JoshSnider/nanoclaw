@@ -259,7 +259,7 @@ async function buildVolumeMounts(
     }
   }
 
-  // Auto-mount all git repos from the mount allowlist
+  // Auto-mount all git repos from the mount allowlist as local clones
   const allowlist = loadMountAllowlist();
   if (allowlist) {
     for (const root of allowlist.allowedRoots) {
@@ -268,11 +268,23 @@ async function buildVolumeMounts(
         : root.path;
       if (isGitRepo(rootPath) && !mounts.some((m) => m.hostPath === rootPath)) {
         const repoName = path.basename(rootPath);
-        mounts.push({
-          hostPath: rootPath,
-          containerPath: `/workspace/extra/${repoName}`,
-          readonly: !root.allowReadWrite,
-        });
+        try {
+          const clonePath = await prepareRepoClone(
+            rootPath,
+            group.folder,
+            repoName,
+          );
+          mounts.push({
+            hostPath: clonePath,
+            containerPath: `/workspace/extra/${repoName}`,
+            readonly: false,
+          });
+        } catch (err) {
+          logger.error(
+            { group: group.name, hostPath: rootPath, err },
+            'Failed to prepare repo clone from allowlist — skipping',
+          );
+        }
       }
     }
   }
