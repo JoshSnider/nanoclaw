@@ -57,7 +57,6 @@ import {
 } from './sender-allowlist.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
-import { cleanupWorktrees } from './worktree.js';
 import { logger } from './logger.js';
 import { DATA_DIR } from './config.js';
 
@@ -253,14 +252,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
 
-  // Clean up worktrees: WIP-commit uncommitted changes, push, remove
-  cleanupWorktrees(group.folder).catch((err) =>
-    logger.error({ group: group.name, err }, 'Failed to cleanup worktrees'),
-  );
-
   // Archive session transcript + notes to DB and shared/conversations/
-  processSessionArchive(group.folder, sessions[group.folder]).catch((err) =>
-    logger.error({ group: group.name, err }, 'Failed to archive session'),
+  processSessionArchive(group.folder, sessions[group.folder]).catch(
+    (err: unknown) =>
+      logger.error({ group: group.name, err }, 'Failed to archive session'),
   );
 
   if (output === 'error' || hadError) {
