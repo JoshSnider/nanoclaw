@@ -85,10 +85,17 @@ export function registerSkillHandler(
 /**
  * Read a skill's manifest.json to check for mcpServer config.
  */
-function readSkillManifest(
-  skillName: string,
-): { mcpServer?: McpServerConfig; setup?: { credentials?: Record<string, { description: string }> } } | null {
-  const manifestPath = path.join(projectRoot, 'container', 'skills', skillName, 'manifest.json');
+function readSkillManifest(skillName: string): {
+  mcpServer?: McpServerConfig;
+  setup?: { credentials?: Record<string, { description: string }> };
+} | null {
+  const manifestPath = path.join(
+    projectRoot,
+    'container',
+    'skills',
+    skillName,
+    'manifest.json',
+  );
   if (!fs.existsSync(manifestPath)) return null;
   try {
     return JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
@@ -131,7 +138,13 @@ async function handleMcpSetup(
  */
 async function lazyLoadSkill(skillName: string): Promise<boolean> {
   // 1. New style: container/skills/{name}/handler.js — no build required
-  const handlerJs = path.join(projectRoot, 'container', 'skills', skillName, 'handler.js');
+  const handlerJs = path.join(
+    projectRoot,
+    'container',
+    'skills',
+    skillName,
+    'handler.js',
+  );
   if (fs.existsSync(handlerJs)) {
     try {
       const mod = await import(handlerJs);
@@ -154,10 +167,16 @@ async function lazyLoadSkill(skillName: string): Promise<boolean> {
     if (fs.existsSync(compiledJs)) {
       try {
         await import(compiledJs);
-        logger.info({ skillName, compiledJs }, 'Lazy-loaded compiled skill handler');
+        logger.info(
+          { skillName, compiledJs },
+          'Lazy-loaded compiled skill handler',
+        );
         return true;
       } catch (err) {
-        logger.error({ skillName, compiledJs, err }, 'Failed to load compiled skill handler');
+        logger.error(
+          { skillName, compiledJs, err },
+          'Failed to load compiled skill handler',
+        );
       }
     }
   }
@@ -189,9 +208,20 @@ export async function processSkillRequest(
       // MCP-backed skill
       if (operation === 'setup') {
         // Setup stores credentials and connects the MCP client
-        const result = await handleMcpSetup(skillName, params, groupFolder, mcpConfig);
-        fs.writeFileSync(responsePath, JSON.stringify({ success: true, result }, null, 2));
-        logger.info({ groupFolder, skillName, operation }, 'MCP skill setup processed');
+        const result = await handleMcpSetup(
+          skillName,
+          params,
+          groupFolder,
+          mcpConfig,
+        );
+        fs.writeFileSync(
+          responsePath,
+          JSON.stringify({ success: true, result }, null, 2),
+        );
+        logger.info(
+          { groupFolder, skillName, operation },
+          'MCP skill setup processed',
+        );
         return;
       }
 
@@ -203,8 +233,14 @@ export async function processSkillRequest(
 
       // Forward to MCP server
       const result = await callMcpTool(skillName, operation, params);
-      fs.writeFileSync(responsePath, JSON.stringify({ success: true, result }, null, 2));
-      logger.info({ groupFolder, skillName, operation }, 'MCP skill request proxied');
+      fs.writeFileSync(
+        responsePath,
+        JSON.stringify({ success: true, result }, null, 2),
+      );
+      logger.info(
+        { groupFolder, skillName, operation },
+        'MCP skill request proxied',
+      );
       return;
     }
 
@@ -224,7 +260,7 @@ export async function processSkillRequest(
       );
       const response = {
         success: false,
-        error: `No handler registered for ${key}. Has the skill been fully set up? Run /create-skill to configure it.`,
+        error: `No handler registered for ${key}. Has the skill been fully set up? Run /add-skill to configure it.`,
       };
       fs.writeFileSync(responsePath, JSON.stringify(response, null, 2));
       return;
@@ -237,15 +273,24 @@ export async function processSkillRequest(
       setCredential: (k, v) => setSkillCredential(groupFolder, skillName, k, v),
     };
     const result = await handler(params, ctx);
-    fs.writeFileSync(responsePath, JSON.stringify({ success: true, result }, null, 2));
-    logger.info({ groupFolder, skillName, operation }, 'Skill request processed');
+    fs.writeFileSync(
+      responsePath,
+      JSON.stringify({ success: true, result }, null, 2),
+    );
+    logger.info(
+      { groupFolder, skillName, operation },
+      'Skill request processed',
+    );
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err);
     logger.error(
       { groupFolder, skillName, operation, err },
       'Skill handler error',
     );
-    fs.writeFileSync(responsePath, JSON.stringify({ success: false, error: errorMsg }, null, 2));
+    fs.writeFileSync(
+      responsePath,
+      JSON.stringify({ success: false, error: errorMsg }, null, 2),
+    );
   }
 }
 
@@ -320,7 +365,10 @@ export async function loadSkillHandlers(dir: string): Promise<void> {
       await import(filePath);
       logger.info({ file }, 'Loaded compiled skill handler module');
     } catch (err) {
-      logger.error({ file, err }, 'Failed to load compiled skill handler module');
+      logger.error(
+        { file, err },
+        'Failed to load compiled skill handler module',
+      );
     }
   }
 }

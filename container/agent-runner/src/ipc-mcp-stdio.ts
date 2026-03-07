@@ -425,7 +425,7 @@ Use load_skill to activate a skill and see its full documentation.`,
     try {
       if (!fs.existsSync(SKILL_INDEX_FILE)) {
         return {
-          content: [{ type: 'text' as const, text: 'No skills registered yet. Use /create-skill to add a new service integration.' }],
+          content: [{ type: 'text' as const, text: 'No skills registered yet. Use /add-skill to add a new service integration.' }],
         };
       }
 
@@ -437,7 +437,7 @@ Use load_skill to activate a skill and see its full documentation.`,
 
       if (skills.length === 0) {
         return {
-          content: [{ type: 'text' as const, text: 'No skills registered yet. Use /create-skill to add a new service integration.' }],
+          content: [{ type: 'text' as const, text: 'No skills registered yet. Use /add-skill to add a new service integration.' }],
         };
       }
 
@@ -478,7 +478,7 @@ If the skill is already active, this just returns the documentation.`,
       return {
         content: [{
           type: 'text' as const,
-          text: `Skill "${skillName}" not found. Run list_skills to see available skills, or /create-skill to create a new one.`,
+          text: `Skill "${skillName}" not found. Run list_skills to see available skills, or /add-skill to create a new one.`,
         }],
         isError: true,
       };

@@ -1,4 +1,4 @@
-# /create-skill
+# /add-skill
 
 Create a new skill that gives agents access to any third-party service or API — without exposing credentials to the container.
 

@@ -126,7 +126,7 @@ async function invokeSkillOperation(
   throw new Error(
     `Skill operation timed out after ${POLL_TIMEOUT_MS / 1000}s. ` +
     `The host may not have a handler registered for ${skillName}.${operation}. ` +
-    `Run /create-skill to set up the handler.`,
+    `Run /add-skill to set up the handler.`,
   );
 }
 
