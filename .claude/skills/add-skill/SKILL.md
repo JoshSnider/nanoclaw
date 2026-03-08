@@ -65,7 +65,7 @@ Only when the service has no MCP server at all. Write a `handler.js` that calls 
 └─────────────────────────────────────┘
 ```
 
-In all three modes, credential values in the manifest (e.g., `"token"`, `"api_key"`) reference keys in the skill's credential store. The agent calls `{name}__setup` to store them. The host resolves them from DB before connecting.
+In all three modes, credential values in the manifest (e.g., `"token"`, `"api_key"`) reference keys in the skill's credential store. The agent calls `set_credential` to store them. The host resolves them from DB before connecting.
 
 ### Do NOT
 
@@ -104,11 +104,10 @@ Agent calls load_skill("name")
   -> IPC activate_skill -> host activates in DB -> skill_index.json updated
   -> if MCP-backed + credentials exist: host connects MCP server, writes discovered tools to IPC
 
-Agent calls name__setup({ token: "..." })
-  -> IPC skill_request (operation: "setup")
-  -> host stores credentials in DB via setSkillCredential()
+Agent calls set_credential({ skill: "name", key: "token", value: "..." })
+  -> IPC set_credential -> host stores in DB via setSkillCredential()
   -> host connects MCP server with new credentials (modes 1 & 2)
-  -> returns "Connected — N tools available"
+  -> returns "Credential stored. MCP server connected — N tools available."
   -> NO restart needed — connection happens immediately at runtime
 
 Agent calls name__operation(params)
@@ -291,12 +290,12 @@ ctx = {
 
 After writing the skill files, YOU must inject credentials immediately. Do NOT tell the user to "run setup later", edit `.env`, or restart. The whole point is that credential injection happens at runtime through IPC.
 
-**How it works:** Call `{name}__setup` with the credentials. This writes a `skill_request` IPC file → the host stores the credentials in the DB → the host connects to the MCP server (modes 1 & 2) or makes them available for handler.js (mode 3). No restart, no `.env`, no manual steps.
+**How it works:** Call `set_credential({ skill: "{name}", key: "token", value: "..." })`. The host stores the credential in the DB, connects the MCP server (modes 1 & 2), and returns confirmation with the number of discovered tools. No restart, no `.env`, no manual steps.
 
 **Workflow:**
 1. Ask the user for the required credential (e.g., "What's your Vercel token? You can generate one at https://vercel.com/account/tokens")
-2. Once the user provides it, call `{name}__setup({ token: "..." })` via the skill tools
-3. The host stores the credential in the DB, connects to the MCP server, and returns the list of discovered tools
+2. Once the user provides it, call `set_credential({ skill: "{name}", key: "token", value: "..." })`
+3. The host stores the credential in the DB, connects to the MCP server, and returns the tool count
 4. Confirm to the user: "Connected — X tools available"
 
 If the user doesn't have a credential yet, give them clear instructions on where to get one and wait. Never skip this step or defer it.
@@ -317,7 +316,7 @@ No `handler.js`. Tools are auto-discovered from the remote MCP server after setu
 
 - **Always check for an existing MCP server first** — most major services have one
 - **Remote > local > custom** — less code = fewer bugs = easier maintenance
-- **Inject credentials immediately** — ask the user for the token during skill creation, call `{name}__setup`, confirm it works. Never defer this to "later" or tell the user to edit config files
+- **Inject credentials immediately** — ask the user for the token during skill creation, call `set_credential`, confirm it works. Never defer this to "later" or tell the user to edit config files
 - **No restarts, no `.env` edits** — everything happens at runtime through IPC. If you find yourself telling the user to restart or edit files, you're doing it wrong
 - **Credential keys** — use descriptive names like `api_key`, `token`, `oauth_token`
 - **For mode 3:** keep operations focused, return plain objects/arrays, use `ctx.setCredential`/`ctx.credentials`

@@ -254,30 +254,8 @@ for (const entry of activeSkills) {
     if (!fs.existsSync(toolsFile)) {
       process.stderr.write(
         `[skills-mcp] No discovered tools for MCP skill "${entry.name}" — ` +
-        `run ${entry.name}__setup to configure credentials\n`,
+        `use set_credential to configure credentials\n`,
       );
-
-      // Register a setup tool so the agent can configure credentials
-      const manifestPath = path.join(SKILLS_DIR, entry.name, 'manifest.json');
-      if (fs.existsSync(manifestPath)) {
-        try {
-          const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
-          const setupCreds = manifest.setup?.credentials;
-          if (setupCreds) {
-            const shape: Record<string, z.ZodTypeAny> = {};
-            for (const [key, def] of Object.entries(setupCreds as Record<string, { description: string }>)) {
-              shape[key] = z.string().describe(def.description);
-            }
-            registerProxyTool(
-              server, entry.name, 'setup',
-              'Store credentials (one-time setup)',
-              z.object(shape),
-            );
-            toolsRegistered++;
-            process.stderr.write(`[skills-mcp] Registered setup tool for MCP skill: ${entry.name}\n`);
-          }
-        } catch { /* ignore parse errors */ }
-      }
       continue;
     }
 
@@ -295,26 +273,6 @@ for (const entry of activeSkills) {
         process.stderr.write(`[skills-mcp] Registered MCP tool: ${entry.name}__${tool.name}\n`);
       }
 
-      // Also register a setup tool for re-configuration
-      const manifestPath = path.join(SKILLS_DIR, entry.name, 'manifest.json');
-      if (fs.existsSync(manifestPath)) {
-        try {
-          const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
-          const setupCreds = manifest.setup?.credentials;
-          if (setupCreds) {
-            const shape: Record<string, z.ZodTypeAny> = {};
-            for (const [key, def] of Object.entries(setupCreds as Record<string, { description: string }>)) {
-              shape[key] = z.string().describe(def.description);
-            }
-            registerProxyTool(
-              server, entry.name, 'setup',
-              'Store or update credentials',
-              z.object(shape),
-            );
-            toolsRegistered++;
-          }
-        } catch { /* ignore */ }
-      }
     } catch (err) {
       process.stderr.write(`[skills-mcp] Failed to read discovered tools for ${entry.name}: ${err}\n`);
     }

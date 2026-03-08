@@ -4,13 +4,13 @@ Manage Vercel projects, deployments, and logs via Vercel's remote MCP server.
 
 ## Setup
 
-Call `vercel__setup` with a personal access token:
+Store the Vercel token using `set_credential`:
 ```
-vercel__setup({ token: "..." })
+set_credential({ skill: "vercel", key: "token", value: "..." })
 ```
 Generate a token at https://vercel.com/account/tokens.
 
-After setup, Vercel's tools are auto-discovered and immediately available. No restart needed.
+After the credential is stored, the host connects to Vercel's MCP server and tools are immediately available. No restart needed.
 
 ## Available Tools
 

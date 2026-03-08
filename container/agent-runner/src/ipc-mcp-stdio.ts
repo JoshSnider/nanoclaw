@@ -568,6 +568,61 @@ server.tool(
   },
 );
 
+server.tool(
+  'set_credential',
+  'Store a credential for a skill. The host stores it in the DB and connects the MCP server if all required credentials are present. No restart needed.',
+  {
+    skill: z.string().describe('The skill name (e.g., "vercel", "github")'),
+    key: z.string().describe('The credential key (e.g., "token", "api_key")'),
+    value: z.string().describe('The credential value'),
+  },
+  async (args) => {
+    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const responsesDir = path.join(IPC_DIR, 'responses');
+    const responsePath = path.join(responsesDir, `${requestId}.json`);
+
+    fs.mkdirSync(responsesDir, { recursive: true });
+
+    writeIpcFile(TASKS_DIR, {
+      type: 'set_credential',
+      skillName: args.skill,
+      key: args.key,
+      value: args.value,
+      requestId,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    });
+
+    // Poll for response from host
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      if (fs.existsSync(responsePath)) {
+        try {
+          const response = JSON.parse(fs.readFileSync(responsePath, 'utf-8'));
+          fs.unlinkSync(responsePath);
+          if (response.success) {
+            return { content: [{ type: 'text' as const, text: response.result }] };
+          } else {
+            return {
+              content: [{ type: 'text' as const, text: `Error: ${response.error}` }],
+              isError: true,
+            };
+          }
+        } catch (err) {
+          if (!(err instanceof SyntaxError)) throw err;
+          // Partial write, retry
+        }
+      }
+      await new Promise((r) => setTimeout(r, 300));
+    }
+
+    return {
+      content: [{ type: 'text' as const, text: 'Credential store timed out. The host may be busy.' }],
+      isError: true,
+    };
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);

@@ -10,10 +10,12 @@ import {
   createTask,
   deleteTask,
   getTaskById,
+  setSkillCredential,
   updateTask,
 } from './db.js';
-import { isValidGroupFolder } from './group-folder.js';
+import { isValidGroupFolder, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
+import { getMcpTools, hasMcpClient } from './mcp-clients.js';
 import {
   connectAndWriteMcpTools,
   processSkillRequest,
@@ -182,8 +184,11 @@ export async function processTaskIpc(
     trigger?: string;
     requiresTrigger?: boolean;
     containerConfig?: RegisteredGroup['containerConfig'];
-    // For activate_skill
+    // For activate_skill / set_credential
     skillName?: string;
+    // For set_credential
+    key?: string;
+    value?: string;
     // For skill_request
     operation?: string;
     params?: Record<string, unknown>;
@@ -484,6 +489,57 @@ export async function processTaskIpc(
         );
       } else {
         logger.warn({ data }, 'activate_skill missing skillName');
+      }
+      break;
+
+    case 'set_credential':
+      if (data.skillName && data.key && data.value && data.requestId) {
+        const responsesDir = path.join(
+          resolveGroupIpcPath(sourceGroup),
+          'responses',
+        );
+        fs.mkdirSync(responsesDir, { recursive: true });
+        const responsePath = path.join(
+          responsesDir,
+          `${data.requestId}.json`,
+        );
+
+        try {
+          setSkillCredential(sourceGroup, data.skillName, data.key, data.value);
+
+          // Try to connect MCP server now that credential is stored
+          await connectAndWriteMcpTools(data.skillName, sourceGroup);
+
+          const toolCount = hasMcpClient(data.skillName)
+            ? (getMcpTools(data.skillName)?.length ?? 0)
+            : 0;
+
+          const result =
+            toolCount > 0
+              ? `Credential "${data.key}" stored. MCP server connected — ${toolCount} tools available.`
+              : `Credential "${data.key}" stored.`;
+
+          fs.writeFileSync(
+            responsePath,
+            JSON.stringify({ success: true, result }),
+          );
+          logger.info(
+            { sourceGroup, skill: data.skillName, key: data.key },
+            'Credential set via IPC',
+          );
+        } catch (err) {
+          const errorMsg = err instanceof Error ? err.message : String(err);
+          fs.writeFileSync(
+            responsePath,
+            JSON.stringify({ success: false, error: errorMsg }),
+          );
+          logger.error(
+            { sourceGroup, skill: data.skillName, key: data.key, err },
+            'Failed to set credential via IPC',
+          );
+        }
+      } else {
+        logger.warn({ data }, 'set_credential missing required fields');
       }
       break;
 
