@@ -776,9 +776,9 @@ export function activateSkill(_groupFolder: string, skillName: string): void {
 }
 
 export function deactivateSkill(_groupFolder: string, skillName: string): void {
-  db.prepare(
-    `DELETE FROM mcp_active_skills WHERE skill_name = ?`,
-  ).run(skillName);
+  db.prepare(`DELETE FROM mcp_active_skills WHERE skill_name = ?`).run(
+    skillName,
+  );
 }
 
 export function getActiveSkills(_groupFolder: string): string[] {
@@ -807,9 +807,7 @@ export function getSkillCredentials(
   skillName: string,
 ): Record<string, string> {
   const rows = db
-    .prepare(
-      `SELECT key, value FROM mcp_credentials WHERE skill_name = ?`,
-    )
+    .prepare(`SELECT key, value FROM mcp_credentials WHERE skill_name = ?`)
     .all(skillName) as Array<{ key: string; value: string }>;
   const result: Record<string, string> = {};
   for (const row of rows) {
@@ -822,9 +820,7 @@ export function deleteSkillCredentials(
   _groupFolder: string,
   skillName: string,
 ): void {
-  db.prepare(
-    `DELETE FROM mcp_credentials WHERE skill_name = ?`,
-  ).run(skillName);
+  db.prepare(`DELETE FROM mcp_credentials WHERE skill_name = ?`).run(skillName);
 }
 
 // --- JSON migration ---

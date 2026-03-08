@@ -24,7 +24,6 @@
 
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
 
 import { DATA_DIR } from './config.js';
 import { resolveGroupIpcPath } from './group-folder.js';
@@ -57,11 +56,8 @@ const handlers: Map<string, SkillHandler> = new Map();
 /** Directory where compiled TS skill handlers live. Set by loadSkillHandlers(). */
 let compiledHandlersDir: string | null = null;
 
-/** Root directory of the nanoclaw project (where container/skills/ lives). */
-const projectRoot = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  '..',
-);
+/** Skills directory — runtime copy in data/skills/, seeded from container/skills/. */
+const skillsDir = path.resolve(DATA_DIR, 'skills');
 
 /**
  * Register a handler for a skill operation.
@@ -90,13 +86,7 @@ function readSkillManifest(skillName: string): {
   mcpServer?: McpServerConfig;
   setup?: { credentials?: Record<string, { description: string }> };
 } | null {
-  const manifestPath = path.join(
-    projectRoot,
-    'container',
-    'skills',
-    skillName,
-    'manifest.json',
-  );
+  const manifestPath = path.join(skillsDir, skillName, 'manifest.json');
   if (!fs.existsSync(manifestPath)) return null;
   try {
     return JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
@@ -138,14 +128,8 @@ async function handleMcpSetup(
  * Returns true if something was loaded.
  */
 async function lazyLoadSkill(skillName: string): Promise<boolean> {
-  // 1. New style: container/skills/{name}/handler.js — no build required
-  const handlerJs = path.join(
-    projectRoot,
-    'container',
-    'skills',
-    skillName,
-    'handler.js',
-  );
+  // 1. New style: data/skills/{name}/handler.js — no build required
+  const handlerJs = path.join(skillsDir, skillName, 'handler.js');
   if (fs.existsSync(handlerJs)) {
     try {
       const mod = await import(handlerJs);
@@ -342,10 +326,7 @@ export async function connectAndWriteMcpTools(
       'MCP tools discovered and written to all IPC dirs',
     );
   } catch (err) {
-    logger.warn(
-      { skillName, err },
-      'Failed to connect MCP server for skill',
-    );
+    logger.warn({ skillName, err }, 'Failed to connect MCP server for skill');
   }
 }
 

@@ -66,43 +66,12 @@ async function buildVolumeMounts(
   const projectRoot = process.cwd();
   const groupDir = resolveGroupFolderPath(group.folder);
 
-  if (isMain) {
-    // Main gets the project root read-only. Writable paths the agent needs
-    // (group folder, IPC, .claude/) are mounted separately below.
-    // Read-only prevents the agent from modifying host application code
-    // (src/, dist/, package.json, etc.) which would bypass the sandbox
-    // entirely on next restart.
-    mounts.push({
-      hostPath: projectRoot,
-      containerPath: '/workspace/project',
-      readonly: true,
-    });
-
-    // Shadow .env so the agent cannot read secrets from the mounted project root.
-    // Secrets are passed via stdin instead (see readSecrets()).
-    const envFile = path.join(projectRoot, '.env');
-    if (fs.existsSync(envFile)) {
-      mounts.push({
-        hostPath: '/dev/null',
-        containerPath: '/workspace/project/.env',
-        readonly: true,
-      });
-    }
-
-    // Main also gets its group folder as the working directory
-    mounts.push({
-      hostPath: groupDir,
-      containerPath: '/workspace/group',
-      readonly: false,
-    });
-  } else {
-    // Other groups only get their own folder
-    mounts.push({
-      hostPath: groupDir,
-      containerPath: '/workspace/group',
-      readonly: false,
-    });
-  }
+  // Group's working directory
+  mounts.push({
+    hostPath: groupDir,
+    containerPath: '/workspace/group',
+    readonly: false,
+  });
 
   // Shared agent instructions + archived conversations (read-only to prevent races)
   const sharedDir = path.join(projectRoot, 'shared');
@@ -147,20 +116,29 @@ async function buildVolumeMounts(
     );
   }
 
-  // Sync skills from container/skills/ into each group's .claude/skills/
-  const skillsSrc = path.join(process.cwd(), 'container', 'skills');
-  const skillsDst = path.join(groupSessionsDir, 'skills');
-  if (fs.existsSync(skillsSrc)) {
-    for (const skillDir of fs.readdirSync(skillsSrc)) {
-      const srcDir = path.join(skillsSrc, skillDir);
-      if (!fs.statSync(srcDir).isDirectory()) continue;
-      const dstDir = path.join(skillsDst, skillDir);
-      fs.cpSync(srcDir, dstDir, { recursive: true });
-    }
-  }
   mounts.push({
     hostPath: groupSessionsDir,
     containerPath: '/home/node/.claude',
+    readonly: false,
+  });
+
+  // Skills live in data/skills/ (outside the source repo) so agent-created
+  // skills persist. Seed from container/skills/ for built-in skills.
+  const skillsDataDir = path.join(DATA_DIR, 'skills');
+  const skillsSrcDir = path.join(projectRoot, 'container', 'skills');
+  if (fs.existsSync(skillsSrcDir)) {
+    fs.mkdirSync(skillsDataDir, { recursive: true });
+    for (const entry of fs.readdirSync(skillsSrcDir)) {
+      const src = path.join(skillsSrcDir, entry);
+      if (!fs.statSync(src).isDirectory()) continue;
+      const dst = path.join(skillsDataDir, entry);
+      // Always overwrite built-in skills with latest from repo
+      fs.cpSync(src, dst, { recursive: true });
+    }
+  }
+  mounts.push({
+    hostPath: skillsDataDir,
+    containerPath: '/home/node/.claude/skills',
     readonly: false,
   });
 
@@ -842,7 +820,9 @@ export function writeSkillIndexSnapshot(groupFolder: string): void {
       }
       break; // only need one source
     }
-  } catch { /* best effort */ }
+  } catch {
+    /* best effort */
+  }
 }
 
 export interface AvailableGroup {
