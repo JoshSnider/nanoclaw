@@ -38,7 +38,10 @@ export interface DiscoveredTool {
 
 interface ManagedClient {
   client: Client;
-  transport: SSEClientTransport | StdioClientTransport | StreamableHTTPClientTransport;
+  transport:
+    | SSEClientTransport
+    | StdioClientTransport
+    | StreamableHTTPClientTransport;
   tools: DiscoveredTool[];
   config: McpServerConfig;
 }
@@ -102,7 +105,10 @@ export async function connectMcpServer(
     { capabilities: {} },
   );
 
-  let transport: SSEClientTransport | StdioClientTransport | StreamableHTTPClientTransport;
+  let transport:
+    | SSEClientTransport
+    | StdioClientTransport
+    | StreamableHTTPClientTransport;
 
   if (config.url) {
     // Remote MCP server — try StreamableHTTP first, fall back to SSE
@@ -135,7 +141,7 @@ export async function connectMcpServer(
   } else if (config.command) {
     // Local MCP server — spawn process with credentials as env vars
     const env: Record<string, string> = {
-      ...process.env as Record<string, string>,
+      ...(process.env as Record<string, string>),
       ...resolvedEnv,
     };
 
@@ -188,7 +194,10 @@ export async function callMcpTool(
     );
   }
 
-  const result = await managed.client.callTool({ name: toolName, arguments: args });
+  const result = await managed.client.callTool({
+    name: toolName,
+    arguments: args,
+  });
 
   // Extract text content from the MCP result
   if (result.content && Array.isArray(result.content)) {

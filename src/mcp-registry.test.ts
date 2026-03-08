@@ -5,9 +5,9 @@ import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Mock mcp-clients
-const mockConnectMcpServer = vi.fn().mockResolvedValue([
-  { name: 'list_projects', description: 'List projects' },
-]);
+const mockConnectMcpServer = vi
+  .fn()
+  .mockResolvedValue([{ name: 'list_projects', description: 'List projects' }]);
 const mockCallMcpTool = vi.fn().mockResolvedValue({ id: 'prj_123' });
 const mockHasMcpClient = vi.fn().mockReturnValue(false);
 const mockDisconnectMcpServer = vi.fn();
@@ -35,9 +35,11 @@ vi.mock('./logger.js', () => ({
 const mockCredentials: Record<string, string> = {};
 vi.mock('./db.js', () => ({
   getSkillCredentials: vi.fn(() => ({ ...mockCredentials })),
-  setSkillCredential: vi.fn((group: string, skill: string, key: string, value: string) => {
-    mockCredentials[key] = value;
-  }),
+  setSkillCredential: vi.fn(
+    (group: string, skill: string, key: string, value: string) => {
+      mockCredentials[key] = value;
+    },
+  ),
 }));
 
 // Mock group-folder to use temp dirs
@@ -49,13 +51,18 @@ vi.mock('./group-folder.js', () => ({
 // We need to set up the project root to point to a temp directory with skills
 let projectRoot: string;
 
-import { processSkillRequest, connectAndWriteMcpTools } from './mcp-registry.js';
+import {
+  processSkillRequest,
+  connectAndWriteMcpTools,
+} from './mcp-registry.js';
 
 describe('mcp-registry', () => {
   beforeEach(() => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-test-'));
     // Create IPC directories
-    fs.mkdirSync(path.join(tempDir, 'ipc', 'test-group', 'responses'), { recursive: true });
+    fs.mkdirSync(path.join(tempDir, 'ipc', 'test-group', 'responses'), {
+      recursive: true,
+    });
 
     // Reset mocks
     mockConnectMcpServer.mockClear();
@@ -79,7 +86,12 @@ describe('mcp-registry', () => {
   describe('processSkillRequest with MCP-backed skills', () => {
     it('forwards tool calls to MCP client when skill has mcpServer config', async () => {
       // Create a manifest with mcpServer in the project's container/skills dir
-      const skillDir = path.join(process.cwd(), 'container', 'skills', '__test_mcp_skill');
+      const skillDir = path.join(
+        process.cwd(),
+        'container',
+        'skills',
+        '__test_mcp_skill',
+      );
       fs.mkdirSync(skillDir, { recursive: true });
       fs.writeFileSync(
         path.join(skillDir, 'manifest.json'),
@@ -120,7 +132,13 @@ describe('mcp-registry', () => {
         );
 
         // Should have written the response
-        const responsePath = path.join(tempDir, 'ipc', 'test-group', 'responses', 'req-001.json');
+        const responsePath = path.join(
+          tempDir,
+          'ipc',
+          'test-group',
+          'responses',
+          'req-001.json',
+        );
         const response = JSON.parse(fs.readFileSync(responsePath, 'utf-8'));
         expect(response.success).toBe(true);
         expect(response.result).toEqual({ id: 'prj_123' });
@@ -130,7 +148,12 @@ describe('mcp-registry', () => {
     });
 
     it('handles setup operation for MCP-backed skills', async () => {
-      const skillDir = path.join(process.cwd(), 'container', 'skills', '__test_mcp_setup');
+      const skillDir = path.join(
+        process.cwd(),
+        'container',
+        'skills',
+        '__test_mcp_setup',
+      );
       fs.mkdirSync(skillDir, { recursive: true });
       fs.writeFileSync(
         path.join(skillDir, 'manifest.json'),
@@ -156,14 +179,23 @@ describe('mcp-registry', () => {
         // Should have stored credentials
         const { setSkillCredential } = await import('./db.js');
         expect(setSkillCredential).toHaveBeenCalledWith(
-          'test-group', '__test_mcp_setup', 'token', 'my-api-token',
+          'test-group',
+          '__test_mcp_setup',
+          'token',
+          'my-api-token',
         );
 
         // Should have tried to connect MCP server
         expect(mockConnectMcpServer).toHaveBeenCalled();
 
         // Should have written success response
-        const responsePath = path.join(tempDir, 'ipc', 'test-group', 'responses', 'req-002.json');
+        const responsePath = path.join(
+          tempDir,
+          'ipc',
+          'test-group',
+          'responses',
+          'req-002.json',
+        );
         const response = JSON.parse(fs.readFileSync(responsePath, 'utf-8'));
         expect(response.success).toBe(true);
         expect(response.result).toContain('Credentials stored');
@@ -173,7 +205,12 @@ describe('mcp-registry', () => {
     });
 
     it('skips MCP path for skills without mcpServer config', async () => {
-      const skillDir = path.join(process.cwd(), 'container', 'skills', '__test_handler_skill');
+      const skillDir = path.join(
+        process.cwd(),
+        'container',
+        'skills',
+        '__test_handler_skill',
+      );
       fs.mkdirSync(skillDir, { recursive: true });
       fs.writeFileSync(
         path.join(skillDir, 'manifest.json'),
@@ -203,7 +240,13 @@ describe('mcp-registry', () => {
         expect(mockCallMcpTool).not.toHaveBeenCalled();
 
         // Should have written response from handler
-        const responsePath = path.join(tempDir, 'ipc', 'test-group', 'responses', 'req-003.json');
+        const responsePath = path.join(
+          tempDir,
+          'ipc',
+          'test-group',
+          'responses',
+          'req-003.json',
+        );
         const response = JSON.parse(fs.readFileSync(responsePath, 'utf-8'));
         expect(response.success).toBe(true);
         expect(response.result).toBe('handler result');
@@ -213,13 +256,21 @@ describe('mcp-registry', () => {
     });
 
     it('reuses existing MCP client connection', async () => {
-      const skillDir = path.join(process.cwd(), 'container', 'skills', '__test_reuse');
+      const skillDir = path.join(
+        process.cwd(),
+        'container',
+        'skills',
+        '__test_reuse',
+      );
       fs.mkdirSync(skillDir, { recursive: true });
       fs.writeFileSync(
         path.join(skillDir, 'manifest.json'),
         JSON.stringify({
           name: '__test_reuse',
-          mcpServer: { url: 'https://mcp.test.com/sse', auth: { bearer: 'token' } },
+          mcpServer: {
+            url: 'https://mcp.test.com/sse',
+            auth: { bearer: 'token' },
+          },
         }),
       );
 
@@ -227,7 +278,13 @@ describe('mcp-registry', () => {
         mockCredentials.token = 'test-token';
         mockHasMcpClient.mockReturnValue(true); // Already connected
 
-        await processSkillRequest('test-group', '__test_reuse', 'list_projects', {}, 'req-004');
+        await processSkillRequest(
+          'test-group',
+          '__test_reuse',
+          'list_projects',
+          {},
+          'req-004',
+        );
 
         // Should NOT have connected again
         expect(mockConnectMcpServer).not.toHaveBeenCalled();
@@ -241,13 +298,21 @@ describe('mcp-registry', () => {
 
   describe('connectAndWriteMcpTools', () => {
     it('connects MCP server and writes discovered tools to IPC', async () => {
-      const skillDir = path.join(process.cwd(), 'container', 'skills', '__test_write_tools');
+      const skillDir = path.join(
+        process.cwd(),
+        'container',
+        'skills',
+        '__test_write_tools',
+      );
       fs.mkdirSync(skillDir, { recursive: true });
       fs.writeFileSync(
         path.join(skillDir, 'manifest.json'),
         JSON.stringify({
           name: '__test_write_tools',
-          mcpServer: { url: 'https://mcp.test.com/sse', auth: { bearer: 'token' } },
+          mcpServer: {
+            url: 'https://mcp.test.com/sse',
+            auth: { bearer: 'token' },
+          },
         }),
       );
 
@@ -259,7 +324,13 @@ describe('mcp-registry', () => {
         expect(mockConnectMcpServer).toHaveBeenCalled();
 
         // Should have written tools file
-        const toolsFile = path.join(tempDir, 'ipc', 'test-group', 'skill_tools', '__test_write_tools.json');
+        const toolsFile = path.join(
+          tempDir,
+          'ipc',
+          'test-group',
+          'skill_tools',
+          '__test_write_tools.json',
+        );
         expect(fs.existsSync(toolsFile)).toBe(true);
         const tools = JSON.parse(fs.readFileSync(toolsFile, 'utf-8'));
         expect(tools).toHaveLength(1);
@@ -270,13 +341,21 @@ describe('mcp-registry', () => {
     });
 
     it('skips connection when credentials are missing', async () => {
-      const skillDir = path.join(process.cwd(), 'container', 'skills', '__test_no_creds');
+      const skillDir = path.join(
+        process.cwd(),
+        'container',
+        'skills',
+        '__test_no_creds',
+      );
       fs.mkdirSync(skillDir, { recursive: true });
       fs.writeFileSync(
         path.join(skillDir, 'manifest.json'),
         JSON.stringify({
           name: '__test_no_creds',
-          mcpServer: { url: 'https://mcp.test.com/sse', auth: { bearer: 'token' } },
+          mcpServer: {
+            url: 'https://mcp.test.com/sse',
+            auth: { bearer: 'token' },
+          },
         }),
       );
 
@@ -292,7 +371,12 @@ describe('mcp-registry', () => {
     });
 
     it('is a no-op for non-MCP skills', async () => {
-      const skillDir = path.join(process.cwd(), 'container', 'skills', '__test_no_mcp');
+      const skillDir = path.join(
+        process.cwd(),
+        'container',
+        'skills',
+        '__test_no_mcp',
+      );
       fs.mkdirSync(skillDir, { recursive: true });
       fs.writeFileSync(
         path.join(skillDir, 'manifest.json'),

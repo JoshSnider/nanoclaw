@@ -72,8 +72,9 @@ In all three modes, credential values in the manifest (e.g., `"token"`, `"api_ke
 - **Run MCP servers inside the container** — this would expose credentials to the agent, defeating the entire security model
 - **Modify `agent-runner/src/index.ts`** to add MCP server configs — the skills system already handles this
 - **Duplicate the proxy system** — don't create parallel mechanisms for registering tools; use the existing manifest + handler pattern
-- **Require a service restart** — handlers are lazy-loaded on first use, no rebuild or restart needed
+- **Require a service restart** — handlers are lazy-loaded on first use, no rebuild or restart needed. MCP connections happen at runtime when setup is called. NEVER tell the user to restart, edit `.env`, or run manual commands
 - **Write a handler.js when an MCP server exists** — always prefer remote > local MCP > custom handler
+- **Tell the user to "run setup later"** — YOU inject credentials during skill creation (see step 6 below)
 
 ### Architecture Summary
 
@@ -101,12 +102,20 @@ Each skill lives in `container/skills/{name}/` and requires:
 ```
 Agent calls load_skill("name")
   -> IPC activate_skill -> host activates in DB -> skill_index.json updated
+  -> if MCP-backed + credentials exist: host connects MCP server, writes discovered tools to IPC
+
+Agent calls name__setup({ token: "..." })
+  -> IPC skill_request (operation: "setup")
+  -> host stores credentials in DB via setSkillCredential()
+  -> host connects MCP server with new credentials (modes 1 & 2)
+  -> returns "Connected — N tools available"
+  -> NO restart needed — connection happens immediately at runtime
 
 Agent calls name__operation(params)
   -> skills-mcp-server.ts writes IPC skill_request
   -> host ipc.ts reads task -> mcp-registry.ts processSkillRequest()
-  -> lazy-loads container/skills/{name}/handler.js if not yet loaded
-  -> reads credentials from DB, executes handler
+  -> modes 1 & 2: proxies to MCP server (already connected from setup)
+  -> mode 3: lazy-loads handler.js, reads credentials from DB, executes handler
   -> writes response to ipc/{group}/responses/{requestId}.json
   -> skills-mcp-server.ts polls for response, returns to agent
 ```
@@ -278,29 +287,37 @@ ctx = {
 }
 ```
 
-### 6. Activate and test
+### 6. Inject credentials (CRITICAL — do not skip)
 
-The skill appears in `list_skills` immediately. The agent activates it with:
+After writing the skill files, YOU must inject credentials immediately. Do NOT tell the user to "run setup later", edit `.env`, or restart. The whole point is that credential injection happens at runtime through IPC.
 
-```
-load_skill("{name}")
-```
+**How it works:** Call `{name}__setup` with the credentials. This writes a `skill_request` IPC file → the host stores the credentials in the DB → the host connects to the MCP server (modes 1 & 2) or makes them available for handler.js (mode 3). No restart, no `.env`, no manual steps.
 
-Then calls `{name}__setup` to store credentials. For modes 1 and 2, tools are available immediately after setup. For mode 3, tool calls go through the handler.js.
+**Workflow:**
+1. Ask the user for the required credential (e.g., "What's your Vercel token? You can generate one at https://vercel.com/account/tokens")
+2. Once the user provides it, call `{name}__setup({ token: "..." })` via the skill tools
+3. The host stores the credential in the DB, connects to the MCP server, and returns the list of discovered tools
+4. Confirm to the user: "Connected — X tools available"
 
-## Example: Vercel Skill
+If the user doesn't have a credential yet, give them clear instructions on where to get one and wait. Never skip this step or defer it.
 
-See `container/skills/vercel/` for a complete example (currently mode 3, migrating to mode 1):
-- `manifest.json` — declares operations
-- `SKILL.md` — agent-facing docs
-- `handler.js` — uses `fetch` against the Vercel REST API
+### 7. Verify
 
-Once migrated to mode 1, this becomes just a manifest with `"url": "https://mcp.vercel.com/sse"` and a SKILL.md — no handler.js.
+After credential injection, verify the skill works by calling one of its tools (e.g., a list operation). If it fails, check the credential and try `{name}__setup` again.
+
+## Example: Vercel Skill (mode 1 — remote MCP)
+
+See `container/skills/vercel/` — the canonical mode 1 example:
+- `manifest.json` — just `mcpServer` config + `setup.credentials` block. No operations list needed.
+- `SKILL.md` — agent-facing docs and tips
+
+No `handler.js`. Tools are auto-discovered from the remote MCP server after setup.
 
 ## Tips
 
 - **Always check for an existing MCP server first** — most major services have one
 - **Remote > local > custom** — less code = fewer bugs = easier maintenance
-- **Use the `setup` pattern** — agent walks user through credential collection interactively
+- **Inject credentials immediately** — ask the user for the token during skill creation, call `{name}__setup`, confirm it works. Never defer this to "later" or tell the user to edit config files
+- **No restarts, no `.env` edits** — everything happens at runtime through IPC. If you find yourself telling the user to restart or edit files, you're doing it wrong
 - **Credential keys** — use descriptive names like `api_key`, `token`, `oauth_token`
 - **For mode 3:** keep operations focused, return plain objects/arrays, use `ctx.setCredential`/`ctx.credentials`

@@ -43,16 +43,17 @@ Implementation pattern:
 2. Add the channel instance to `main()` in `src/index.ts` and wire callbacks (`onMessage`, `onChatMetadata`)
 3. Messages are stored via the `onMessage` callback; routing is automatic via `ownsJid()`
 
-### Adding a New MCP Integration
+### Adding a New Service Integration (Vercel, Stripe, Linear, etc.)
 
-Questions to ask:
-- What service? (Calendar, Notion, database, etc.)
-- What operations needed? (read, write, both)
-- Which groups should have access?
+**Use the skills system — do NOT modify container settings or TypeScript source.**
 
-Implementation:
-1. Add MCP server config to the container settings (see `src/container-runner.ts` for how MCP servers are mounted)
-2. Document available tools in `groups/CLAUDE.md`
+For any third-party service integration, use `/add-skill` which handles the full flow:
+1. Creates the skill manifest (`container/skills/{name}/manifest.json`)
+2. Writes agent-facing docs (`SKILL.md`)
+3. Injects credentials at runtime via `{name}__setup` — no restart, no `.env` edits
+4. Tools become available immediately
+
+See `.claude/skills/add-skill/SKILL.md` for the full reference. The key principle: credentials are stored in the DB via IPC and the host connects to the MCP server at runtime.
 
 ### Changing Assistant Behavior
 
@@ -88,15 +89,12 @@ Implementation:
 
 ## After Changes
 
-Always tell the user:
+**For skill/integration changes:** No rebuild or restart needed. Skills are loaded at runtime — just create the files and call `{name}__setup` to inject credentials.
+
+**For TypeScript source changes only** (channels, router, config):
 ```bash
-# Rebuild and restart
-npm run build
-# macOS:
-launchctl unload ~/Library/LaunchAgents/com.nanoclaw.plist
-launchctl load ~/Library/LaunchAgents/com.nanoclaw.plist
-# Linux:
-# systemctl --user restart nanoclaw
+npm run build && launchctl kickstart -k gui/$(id -u)/com.nanoclaw  # macOS
+npm run build && systemctl --user restart nanoclaw                  # Linux
 ```
 
 ## Example Interaction

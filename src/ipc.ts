@@ -14,7 +14,10 @@ import {
 } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
-import { connectAndWriteMcpTools, processSkillRequest } from './mcp-registry.js';
+import {
+  connectAndWriteMcpTools,
+  processSkillRequest,
+} from './mcp-registry.js';
 import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {

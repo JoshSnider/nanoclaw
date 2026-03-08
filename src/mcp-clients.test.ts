@@ -101,7 +101,11 @@ describe('mcp-clients', () => {
     it('connects to a local MCP server via stdio and discovers tools', async () => {
       const tools = await connectMcpServer(
         'some-tool',
-        { command: 'npx', args: ['-y', '@some/mcp'], env: { API_KEY: 'api_key' } },
+        {
+          command: 'npx',
+          args: ['-y', '@some/mcp'],
+          env: { API_KEY: 'api_key' },
+        },
         { api_key: 'test-key' },
       );
 
@@ -130,9 +134,9 @@ describe('mcp-clients', () => {
     });
 
     it('throws when config has neither url nor command', async () => {
-      await expect(
-        connectMcpServer('bad', {}, {}),
-      ).rejects.toThrow('must have either "url" or "command"');
+      await expect(connectMcpServer('bad', {}, {})).rejects.toThrow(
+        'must have either "url" or "command"',
+      );
     });
 
     it('disconnects existing client before reconnecting', async () => {
@@ -162,14 +166,16 @@ describe('mcp-clients', () => {
         { token: 'test-token' },
       );
 
-      const result = await callMcpTool('vercel', 'list_projects', { team_id: 'team_123' });
+      const result = await callMcpTool('vercel', 'list_projects', {
+        team_id: 'team_123',
+      });
       expect(result).toEqual({ id: 'prj_123', name: 'my-app' });
     });
 
     it('throws when no client is connected', async () => {
-      await expect(
-        callMcpTool('nonexistent', 'some_tool', {}),
-      ).rejects.toThrow('No MCP client connected');
+      await expect(callMcpTool('nonexistent', 'some_tool', {})).rejects.toThrow(
+        'No MCP client connected',
+      );
     });
   });
 
@@ -183,7 +189,10 @@ describe('mcp-clients', () => {
 
       const tools = getMcpTools('vercel');
       expect(tools).toHaveLength(2);
-      expect(tools![0]).toMatchObject({ name: 'list_projects', description: 'List all projects' });
+      expect(tools![0]).toMatchObject({
+        name: 'list_projects',
+        description: 'List all projects',
+      });
     });
 
     it('returns null for unknown skill', () => {

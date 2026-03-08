@@ -1,78 +1,16 @@
 {
   "name": "vercel",
-  "description": "Vercel API — projects, deployments, build logs, runtime logs",
-  "operations": [
-    {
-      "name": "setup",
-      "description": "Store Vercel access token (one-time setup). Optionally set a default team ID.",
-      "params": {
-        "token": { "type": "string", "description": "Vercel personal access token" },
-        "default_team_id": { "type": "string", "description": "Default team ID or slug (e.g. 'team_abc123' or 'my-team'). Optional — saves you typing it every time.", "optional": true }
-      }
-    },
-    {
-      "name": "list_teams",
-      "description": "List all teams the authenticated user belongs to",
-      "params": {}
-    },
-    {
-      "name": "list_projects",
-      "description": "List Vercel projects for a team or personal account",
-      "params": {
-        "team_id": { "type": "string", "description": "Team ID or slug. Omit to use default team or personal account.", "optional": true },
-        "limit": { "type": "number", "description": "Max results (default 20)", "optional": true }
-      }
-    },
-    {
-      "name": "get_project",
-      "description": "Get detailed info about a specific project (framework, domains, latest deployment)",
-      "params": {
-        "project_id": { "type": "string", "description": "Project ID (prj_...) or project slug/name" },
-        "team_id": { "type": "string", "description": "Team ID or slug. Omit to use default.", "optional": true }
-      }
-    },
-    {
-      "name": "list_deployments",
-      "description": "List deployments for a project",
-      "params": {
-        "project_id": { "type": "string", "description": "Project ID or slug" },
-        "team_id": { "type": "string", "description": "Team ID or slug. Omit to use default.", "optional": true },
-        "limit": { "type": "number", "description": "Max results (default 10)", "optional": true },
-        "target": { "type": "string", "description": "Filter by target: 'production' or 'preview'", "optional": true }
-      }
-    },
-    {
-      "name": "get_deployment",
-      "description": "Get detailed info about a specific deployment",
-      "params": {
-        "deployment_id": { "type": "string", "description": "Deployment ID (dpl_...) or deployment URL" },
-        "team_id": { "type": "string", "description": "Team ID or slug. Omit to use default.", "optional": true }
-      }
-    },
-    {
-      "name": "get_build_logs",
-      "description": "Get build logs for a deployment — useful for diagnosing failed builds",
-      "params": {
-        "deployment_id": { "type": "string", "description": "Deployment ID (dpl_...) or deployment URL" },
-        "team_id": { "type": "string", "description": "Team ID or slug. Omit to use default.", "optional": true },
-        "limit": { "type": "number", "description": "Max log lines (default 100)", "optional": true }
-      }
-    },
-    {
-      "name": "get_runtime_logs",
-      "description": "Get runtime/function logs for a project. Filter by level, environment, time range, status code, or search query.",
-      "params": {
-        "project_id": { "type": "string", "description": "Project ID or slug" },
-        "team_id": { "type": "string", "description": "Team ID or slug. Omit to use default.", "optional": true },
-        "deployment_id": { "type": "string", "description": "Filter to a specific deployment ID", "optional": true },
-        "environment": { "type": "string", "description": "Filter by environment: 'production' or 'preview'", "optional": true },
-        "level": { "type": "string", "description": "Comma-separated log levels: error, warning, info, fatal", "optional": true },
-        "since": { "type": "string", "description": "Start time — ISO timestamp or relative like '1h', '30m', '7d' (default: 24h ago)", "optional": true },
-        "until": { "type": "string", "description": "End time — ISO timestamp or relative like 'now'", "optional": true },
-        "limit": { "type": "number", "description": "Max log entries (default 50, max 1000)", "optional": true },
-        "query": { "type": "string", "description": "Full-text search query", "optional": true },
-        "status_code": { "type": "string", "description": "Filter by HTTP status code (e.g. '500', '4xx')", "optional": true }
+  "description": "Vercel deployments, projects, and logs",
+  "mcpServer": {
+    "url": "https://mcp.vercel.com/sse",
+    "auth": { "bearer": "token" }
+  },
+  "setup": {
+    "credentials": {
+      "token": {
+        "description": "Vercel personal access token",
+        "instructions": "Generate one at https://vercel.com/account/tokens"
       }
     }
-  ]
+  }
 }

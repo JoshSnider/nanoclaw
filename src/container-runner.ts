@@ -808,14 +808,12 @@ export function writeSkillIndexSnapshot(groupFolder: string): void {
       const manifestPath = path.join(skillsSrc, skillDir, 'manifest.json');
       if (!fs.existsSync(manifestPath)) continue;
       try {
-        const manifest = JSON.parse(
-          fs.readFileSync(manifestPath, 'utf-8'),
-        );
+        const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
         entries.push({
           name: manifest.name,
           description: manifest.description,
           active: activeSkills.has(manifest.name),
-          hasMcpServer: !!(manifest.mcpServer),
+          hasMcpServer: !!manifest.mcpServer,
         });
       } catch (err) {
         logger.warn({ skillDir, err }, 'Failed to parse skill manifest');
