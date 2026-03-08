@@ -448,7 +448,7 @@ Use load_skill to activate a skill and see its full documentation.`,
       return {
         content: [{
           type: 'text' as const,
-          text: `Available skills (✓ = active, ○ = inactive):\n\n${lines.join('\n')}\n\nUse load_skill(name) to activate a skill and see its tools.`,
+          text: `Available skills (✓ = active, ○ = inactive):\n\n${lines.join('\n')}\n\nUse load_skill(name) to activate and register tools. Active skill tools are available as mcp__nanoclaw__{skill}__{tool}.`,
         }],
       };
     } catch (err) {
@@ -462,9 +462,7 @@ Use load_skill to activate a skill and see its full documentation.`,
 
 server.tool(
   'load_skill',
-  `Activate a skill and get its usage documentation.
-Once activated, the skill's MCP tools become available immediately via set_credential.
-If the skill is already active, this just returns the documentation.`,
+  `Activate a skill and register its MCP tools. Tools become available as mcp__nanoclaw__{skill}__{tool}.`,
   {
     name: z.string().describe('The skill name to load (from list_skills)'),
   },
@@ -506,14 +504,27 @@ If the skill is already active, this just returns the documentation.`,
       });
     }
 
+    // Wait for host to write tools file (MCP-backed skills)
+    const toolsFile = path.join(SKILL_TOOLS_DIR, `${skillName}.json`);
+    let toolCount = 0;
+    if (!fs.existsSync(toolsFile)) {
+      // Poll for up to 10s for the host to connect and write tools
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        if (fs.existsSync(toolsFile)) break;
+        await new Promise((r) => setTimeout(r, 300));
+      }
+    }
+    toolCount = registerDiscoveredTools(skillName);
+
     // Return the SKILL.md docs
     const skillDoc = fs.existsSync(skillMdPath)
       ? fs.readFileSync(skillMdPath, 'utf-8')
       : `# ${skillName}\n\nSkill activated. Check the manifest for available operations.`;
 
-    const status = isAlreadyActive
-      ? `✓ Skill "${skillName}" is already active — its MCP tools are ready.`
-      : `✓ Skill "${skillName}" activated. Use set_credential to configure credentials — tools will be available immediately.`;
+    const status = toolCount > 0
+      ? `✓ Skill "${skillName}" active — ${toolCount} tools registered and ready.`
+      : `✓ Skill "${skillName}" activated but no tools discovered. Has it been set up? Use /add-skill to configure it.`;
 
     return {
       content: [{

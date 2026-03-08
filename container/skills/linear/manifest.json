@@ -1,0 +1,16 @@
+{
+  "name": "linear",
+  "description": "Linear — issues, projects, teams, and cycles",
+  "mcpServer": {
+    "url": "https://mcp.linear.app/mcp",
+    "auth": { "bearer": "api_key" }
+  },
+  "setup": {
+    "credentials": {
+      "api_key": {
+        "description": "Linear personal API key",
+        "instructions": "Generate one at https://linear.app/settings/api under 'Personal API keys'"
+      }
+    }
+  }
+}
