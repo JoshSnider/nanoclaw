@@ -823,6 +823,26 @@ export function writeSkillIndexSnapshot(groupFolder: string): void {
 
   const indexFile = path.join(groupIpcDir, 'skill_index.json');
   fs.writeFileSync(indexFile, JSON.stringify(entries, null, 2));
+
+  // Copy skill tools from any existing IPC dir so new sessions get them
+  const ipcBaseDir = path.dirname(groupIpcDir);
+  const toolsDestDir = path.join(groupIpcDir, 'skill_tools');
+  try {
+    for (const dir of fs.readdirSync(ipcBaseDir)) {
+      if (dir === groupFolder) continue;
+      const srcToolsDir = path.join(ipcBaseDir, dir, 'skill_tools');
+      if (!fs.existsSync(srcToolsDir)) continue;
+      fs.mkdirSync(toolsDestDir, { recursive: true });
+      for (const file of fs.readdirSync(srcToolsDir)) {
+        if (!file.endsWith('.json')) continue;
+        const destFile = path.join(toolsDestDir, file);
+        if (!fs.existsSync(destFile)) {
+          fs.copyFileSync(path.join(srcToolsDir, file), destFile);
+        }
+      }
+      break; // only need one source
+    }
+  } catch { /* best effort */ }
 }
 
 export interface AvailableGroup {

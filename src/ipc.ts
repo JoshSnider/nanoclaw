@@ -499,10 +499,7 @@ export async function processTaskIpc(
           'responses',
         );
         fs.mkdirSync(responsesDir, { recursive: true });
-        const responsePath = path.join(
-          responsesDir,
-          `${data.requestId}.json`,
-        );
+        const responsePath = path.join(responsesDir, `${data.requestId}.json`);
 
         try {
           setSkillCredential(sourceGroup, data.skillName, data.key, data.value);

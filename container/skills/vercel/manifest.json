@@ -2,7 +2,7 @@
   "name": "vercel",
   "description": "Vercel deployments, projects, and logs",
   "mcpServer": {
-    "url": "https://mcp.vercel.com/sse",
+    "url": "https://mcp.vercel.com",
     "auth": { "bearer": "token" }
   },
   "setup": {

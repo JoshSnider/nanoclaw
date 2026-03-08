@@ -26,6 +26,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
+import { DATA_DIR } from './config.js';
 import { resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
 import { getSkillCredentials, setSkillCredential } from './db.js';
@@ -324,22 +325,25 @@ export async function connectAndWriteMcpTools(
 
   try {
     const tools = await connectMcpServer(skillName, mcpConfig, credentials);
+    const toolsJson = JSON.stringify(tools, null, 2);
 
-    // Write discovered tools to IPC so the container's skills-mcp-server can read them
-    const toolsDir = path.join(resolveGroupIpcPath(groupFolder), 'skill_tools');
-    fs.mkdirSync(toolsDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(toolsDir, `${skillName}.json`),
-      JSON.stringify(tools, null, 2),
-    );
+    // Write discovered tools to ALL group IPC dirs so any session can use them
+    const ipcBaseDir = path.resolve(DATA_DIR, 'ipc');
+    if (fs.existsSync(ipcBaseDir)) {
+      for (const dir of fs.readdirSync(ipcBaseDir)) {
+        const toolsDir = path.join(ipcBaseDir, dir, 'skill_tools');
+        fs.mkdirSync(toolsDir, { recursive: true });
+        fs.writeFileSync(path.join(toolsDir, `${skillName}.json`), toolsJson);
+      }
+    }
 
     logger.info(
-      { skillName, groupFolder, toolCount: tools.length },
-      'MCP tools discovered and written to IPC',
+      { skillName, toolCount: tools.length },
+      'MCP tools discovered and written to all IPC dirs',
     );
   } catch (err) {
     logger.warn(
-      { skillName, groupFolder, err },
+      { skillName, err },
       'Failed to connect MCP server for skill',
     );
   }

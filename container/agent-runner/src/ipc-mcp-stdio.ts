@@ -463,7 +463,7 @@ Use load_skill to activate a skill and see its full documentation.`,
 server.tool(
   'load_skill',
   `Activate a skill and get its usage documentation.
-Once activated, the skill's MCP tools are available on the next message (tools are connected at container startup).
+Once activated, the skill's MCP tools become available immediately via set_credential.
 If the skill is already active, this just returns the documentation.`,
   {
     name: z.string().describe('The skill name to load (from list_skills)'),
@@ -513,7 +513,7 @@ If the skill is already active, this just returns the documentation.`,
 
     const status = isAlreadyActive
       ? `✓ Skill "${skillName}" is already active — its MCP tools are ready.`
-      : `✓ Skill "${skillName}" activated. Its MCP tools (mcp__skills__${skillName}__*) will be connected on the next message.`;
+      : `✓ Skill "${skillName}" activated. Use set_credential to configure credentials — tools will be available immediately.`;
 
     return {
       content: [{
@@ -568,9 +568,121 @@ server.tool(
   },
 );
 
+const SKILL_TOOLS_DIR = path.join(IPC_DIR, 'skill_tools');
+const RESPONSES_DIR = path.join(IPC_DIR, 'responses');
+
+/**
+ * Send a skill_request IPC and wait for the host response.
+ */
+async function invokeSkillOperation(
+  skillName: string,
+  operation: string,
+  params: Record<string, unknown>,
+): Promise<unknown> {
+  const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const responsePath = path.join(RESPONSES_DIR, `${requestId}.json`);
+
+  fs.mkdirSync(RESPONSES_DIR, { recursive: true });
+
+  writeIpcFile(TASKS_DIR, {
+    type: 'skill_request',
+    skillName,
+    operation,
+    params,
+    requestId,
+    groupFolder,
+    timestamp: new Date().toISOString(),
+  });
+
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    if (fs.existsSync(responsePath)) {
+      try {
+        const response = JSON.parse(fs.readFileSync(responsePath, 'utf-8'));
+        fs.unlinkSync(responsePath);
+        if (response.success) return response.result;
+        throw new Error(response.error || 'Skill operation failed');
+      } catch (err) {
+        if (!(err instanceof SyntaxError)) throw err;
+      }
+    }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  throw new Error(`Skill operation timed out after 30s.`);
+}
+
+/** Track which skill tools have been registered to avoid duplicates. */
+const registeredSkillTools = new Set<string>();
+
+/**
+ * Read discovered tools from IPC and register them on this server.
+ * Called after set_credential succeeds and the host writes the tools file.
+ */
+function registerDiscoveredTools(skillName: string): number {
+  const toolsFile = path.join(SKILL_TOOLS_DIR, `${skillName}.json`);
+  if (!fs.existsSync(toolsFile)) return 0;
+
+  let tools: Array<{
+    name: string;
+    description?: string;
+    inputSchema?: {
+      type?: string;
+      properties?: Record<string, { type?: string; description?: string }>;
+      required?: string[];
+    };
+  }>;
+  try {
+    tools = JSON.parse(fs.readFileSync(toolsFile, 'utf-8'));
+  } catch {
+    return 0;
+  }
+
+  let count = 0;
+  for (const tool of tools) {
+    const fullName = `${skillName}__${tool.name}`;
+    if (registeredSkillTools.has(fullName)) continue;
+
+    // Build Zod schema from JSON schema
+    const shape: Record<string, z.ZodTypeAny> = {};
+    const props = tool.inputSchema?.properties ?? {};
+    const required = new Set(tool.inputSchema?.required ?? []);
+    for (const [name, prop] of Object.entries(props)) {
+      let s: z.ZodTypeAny = prop.type === 'number' || prop.type === 'integer'
+        ? z.number()
+        : prop.type === 'boolean'
+          ? z.boolean()
+          : z.string();
+      if (prop.description) s = s.describe(prop.description);
+      if (!required.has(name)) s = s.optional();
+      shape[name] = s;
+    }
+
+    server.tool(
+      fullName,
+      `[${skillName}] ${tool.description || tool.name}`,
+      shape,
+      async (args) => {
+        try {
+          const result = await invokeSkillOperation(skillName, tool.name, args as Record<string, unknown>);
+          const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+          return { content: [{ type: 'text' as const, text }] };
+        } catch (err) {
+          return {
+            content: [{ type: 'text' as const, text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
+            isError: true,
+          };
+        }
+      },
+    );
+    registeredSkillTools.add(fullName);
+    count++;
+  }
+  return count;
+}
+
 server.tool(
   'set_credential',
-  'Store a credential for a skill. The host stores it in the DB and connects the MCP server if all required credentials are present. No restart needed.',
+  'Store a credential for a skill. The host stores it in the DB and connects the MCP server if all required credentials are present. Tools become available immediately.',
   {
     skill: z.string().describe('The skill name (e.g., "vercel", "github")'),
     key: z.string().describe('The credential key (e.g., "token", "api_key")'),
@@ -601,7 +713,14 @@ server.tool(
           const response = JSON.parse(fs.readFileSync(responsePath, 'utf-8'));
           fs.unlinkSync(responsePath);
           if (response.success) {
-            return { content: [{ type: 'text' as const, text: response.result }] };
+            // Host connected MCP and wrote tools file — register them now
+            // Brief delay to let the host finish writing the tools file
+            await new Promise((r) => setTimeout(r, 500));
+            const toolCount = registerDiscoveredTools(args.skill);
+            const msg = toolCount > 0
+              ? `${response.result} ${toolCount} tools now available.`
+              : response.result;
+            return { content: [{ type: 'text' as const, text: msg }] };
           } else {
             return {
               content: [{ type: 'text' as const, text: `Error: ${response.error}` }],
@@ -610,7 +729,6 @@ server.tool(
           }
         } catch (err) {
           if (!(err instanceof SyntaxError)) throw err;
-          // Partial write, retry
         }
       }
       await new Promise((r) => setTimeout(r, 300));
@@ -622,6 +740,22 @@ server.tool(
     };
   },
 );
+
+// Register tools for already-configured skills at startup
+try {
+  if (fs.existsSync(SKILL_TOOLS_DIR)) {
+    for (const file of fs.readdirSync(SKILL_TOOLS_DIR)) {
+      if (!file.endsWith('.json')) continue;
+      const skillName = file.replace(/\.json$/, '');
+      const count = registerDiscoveredTools(skillName);
+      if (count > 0) {
+        process.stderr.write(`[nanoclaw] Registered ${count} tools for skill "${skillName}"\n`);
+      }
+    }
+  }
+} catch (err) {
+  process.stderr.write(`[nanoclaw] Failed to scan skill tools: ${err}\n`);
+}
 
 // Start the stdio transport
 const transport = new StdioServerTransport();

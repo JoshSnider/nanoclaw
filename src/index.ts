@@ -26,6 +26,7 @@ import {
   ensureContainerRuntimeRunning,
 } from './container-runtime.js';
 import {
+  getActiveSkills,
   getAllChats,
   getAllRegisteredGroups,
   getAllSessions,
@@ -47,7 +48,7 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
-import { loadSkillHandlers } from './mcp-registry.js';
+import { connectAndWriteMcpTools, loadSkillHandlers } from './mcp-registry.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
   isSenderAllowed,
@@ -764,6 +765,14 @@ async function main(): Promise<void> {
   const skillHandlersDir = new URL('../dist/skill-handlers', import.meta.url)
     .pathname;
   await loadSkillHandlers(skillHandlersDir);
+
+  // Connect MCP servers for active skills with credentials at startup
+  const activeSkills = getActiveSkills('_global');
+  for (const skillName of activeSkills) {
+    connectAndWriteMcpTools(skillName, '_global').catch((err) =>
+      logger.warn({ skillName, err }, 'Failed to connect MCP skill at startup'),
+    );
+  }
 
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {

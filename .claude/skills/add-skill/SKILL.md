@@ -47,8 +47,8 @@ Only when the service has no MCP server at all. Write a `handler.js` that calls 
 │  Agent calls vercel__list_projects  │
 │       │                             │
 │       ▼                             │
-│  skills-mcp-server (dumb proxy)     │
-│  writes IPC file to /workspace/ipc  │
+│  ipc-mcp-stdio.ts (nanoclaw MCP)   │
+│  writes IPC skill_request           │
 │  polls for response file            │
 │       │                             │
 └───────┼─────────────────────────────┘
@@ -94,8 +94,7 @@ Each skill lives in `container/skills/{name}/` and requires:
 | `src/db.ts` | `getSkillCredentials()`, `setSkillCredential()`, `activateSkill()`, `getActiveSkills()` |
 | `src/ipc.ts` | Processes `skill_request` IPC messages, routes to handlers |
 | `src/container-runner.ts` | `writeSkillIndexSnapshot()`, `SkillManifest` interface |
-| `container/agent-runner/src/skills-mcp-server.ts` | Container-side dumb proxy (reads manifests, writes IPC) |
-| `container/agent-runner/src/ipc-mcp-stdio.ts` | Provides `list_skills` and `load_skill` tools to agent |
+| `container/agent-runner/src/ipc-mcp-stdio.ts` | Container MCP server — provides all agent tools including skill proxying |
 
 ### Data Flow
 
@@ -111,12 +110,12 @@ Agent calls set_credential({ skill: "name", key: "token", value: "..." })
   -> NO restart needed — connection happens immediately at runtime
 
 Agent calls name__operation(params)
-  -> skills-mcp-server.ts writes IPC skill_request
+  -> ipc-mcp-stdio.ts writes IPC skill_request
   -> host ipc.ts reads task -> mcp-registry.ts processSkillRequest()
   -> modes 1 & 2: proxies to MCP server (already connected from setup)
   -> mode 3: lazy-loads handler.js, reads credentials from DB, executes handler
   -> writes response to ipc/{group}/responses/{requestId}.json
-  -> skills-mcp-server.ts polls for response, returns to agent
+  -> ipc-mcp-stdio.ts polls for response, returns to agent
 ```
 
 ### SkillOperationContext
