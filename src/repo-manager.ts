@@ -24,6 +24,21 @@ import { logger } from './logger.js';
 const execAsync = promisify(exec);
 
 /**
+ * Get the origin remote URL from a git repo.
+ * Returns null if no origin remote is configured.
+ */
+async function getOriginUrl(repoPath: string): Promise<string | null> {
+  try {
+    const { stdout } = await execAsync('git remote get-url origin', {
+      cwd: repoPath,
+    });
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Detect if a path is a git repository or worktree.
  */
 export function isGitRepo(hostPath: string): boolean {
@@ -77,8 +92,8 @@ function resolveMainWorkingTree(hostPath: string): string {
 /**
  * Prepare a local clone of a git repo for mounting into a container.
  *
- * - First run: clones from the local repo path into data/repos/<group>/<name>/
- * - Subsequent runs: fetches from local origin, resets to origin/<branch>
+ * - First run: clones from local repo, then sets origin to real upstream URL
+ * - Subsequent runs: fetches from local repo (no auth), resets to latest
  *
  * The clone has a self-contained .git directory and works correctly inside
  * the container without any path tricks.
@@ -98,6 +113,10 @@ export async function prepareRepoClone(
   const cloneDir = path.join(DATA_DIR, 'repos', groupFolder, repoName);
   const repoRoot = resolveMainWorkingTree(hostPath);
 
+  // Get the real upstream URL from the host repo (for push inside containers).
+  // Host paths like /Users/josh/max don't exist inside the container.
+  const upstreamUrl = await getOriginUrl(repoRoot);
+
   if (!fs.existsSync(path.join(cloneDir, '.git'))) {
     logger.info(
       { groupFolder, repoName, repoRoot, branch },
@@ -106,12 +125,18 @@ export async function prepareRepoClone(
 
     fs.mkdirSync(cloneDir, { recursive: true });
 
-    // Clone from local path (not origin URL) to avoid SSH auth issues
-    // when running as a launchd/systemd service without access to ssh-agent.
-    // The clone still gets origin set to the local path; containers can
-    // fetch/push to the real remote if needed.
+    // Clone from local path to avoid SSH auth issues when running as a
+    // launchd/systemd service without access to ssh-agent.
     await execAsync(`git clone "${repoRoot}" "${cloneDir}"`);
     await execAsync(`git checkout "${branch}"`, { cwd: cloneDir });
+
+    // Re-point origin to the real upstream so git push works inside
+    // the container (the local host path isn't accessible there).
+    if (upstreamUrl) {
+      await execAsync(`git remote set-url origin "${upstreamUrl}"`, {
+        cwd: cloneDir,
+      });
+    }
 
     logger.info({ groupFolder, repoName, cloneDir }, 'Repo clone ready');
   } else {
@@ -120,10 +145,20 @@ export async function prepareRepoClone(
       'Syncing repo clone from origin',
     );
 
-    await execAsync('git fetch origin', { cwd: cloneDir });
-    // Ensure we're on the right branch before resetting
+    // Fetch from the local host repo (fast, no auth needed), then
+    // re-point origin to the real upstream for the container.
+    await execAsync(
+      `git fetch "${repoRoot}" "${branch}:refs/remotes/origin/${branch}"`,
+      { cwd: cloneDir },
+    );
     await execAsync(`git checkout "${branch}"`, { cwd: cloneDir });
     await execAsync(`git reset --hard "origin/${branch}"`, { cwd: cloneDir });
+
+    if (upstreamUrl) {
+      await execAsync(`git remote set-url origin "${upstreamUrl}"`, {
+        cwd: cloneDir,
+      });
+    }
 
     logger.info({ groupFolder, repoName }, 'Repo clone synced');
   }
