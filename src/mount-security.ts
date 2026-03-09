@@ -23,6 +23,12 @@ const logger = pino({
 let cachedAllowlist: MountAllowlist | null = null;
 let allowlistLoadError: string | null = null;
 
+/** @internal - for tests only. Resets the cached allowlist state. */
+export function _resetAllowlistCache(): void {
+  cachedAllowlist = null;
+  allowlistLoadError = null;
+}
+
 /**
  * Default blocked patterns - paths that should never be mounted
  */
@@ -80,12 +86,14 @@ export function loadMountAllowlist(): MountAllowlist | null {
       throw new Error('allowedRoots must be an array');
     }
 
-    if (!Array.isArray(allowlist.blockedPatterns)) {
+    if (
+      allowlist.blockedPatterns !== undefined &&
+      !Array.isArray(allowlist.blockedPatterns)
+    ) {
       throw new Error('blockedPatterns must be an array');
     }
-
-    if (typeof allowlist.nonMainReadOnly !== 'boolean') {
-      throw new Error('nonMainReadOnly must be a boolean');
+    if (!allowlist.blockedPatterns) {
+      allowlist.blockedPatterns = [];
     }
 
     // Merge with default blocked patterns
@@ -294,16 +302,7 @@ export function validateMount(
   let effectiveReadonly = true; // Default to readonly
 
   if (requestedReadWrite) {
-    if (!isMain && allowlist.nonMainReadOnly) {
-      // Non-main groups forced to read-only
-      effectiveReadonly = true;
-      logger.info(
-        {
-          mount: mount.hostPath,
-        },
-        'Mount forced to read-only for non-main group',
-      );
-    } else if (!allowedRoot.allowReadWrite) {
+    if (!allowedRoot.allowReadWrite) {
       // Root doesn't allow read-write
       effectiveReadonly = true;
       logger.info(
@@ -412,7 +411,6 @@ export function generateAllowlistTemplate(): string {
       'secret',
       'token',
     ],
-    nonMainReadOnly: true,
   };
 
   return JSON.stringify(template, null, 2);

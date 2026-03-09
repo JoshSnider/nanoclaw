@@ -38,6 +38,8 @@ export class SlackChannel implements Channel {
   private outgoingQueue: Array<{ jid: string; text: string }> = [];
   private flushing = false;
   private userNameCache = new Map<string, string>();
+  private reconnecting = false;
+  private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 
   private opts: SlackChannelOpts;
 
@@ -176,12 +178,71 @@ export class SlackChannel implements Channel {
     }
 
     this.connected = true;
+    this.reconnecting = false;
+
+    // Monitor the underlying socket-mode client for disconnections.
+    // Bolt's SocketModeClient auto-reconnects with increasing backoff,
+    // but if it gives up (emits 'disconnected'), we restart the whole connection.
+    this.setupSocketMonitor();
 
     // Flush any messages queued before connection
     await this.flushOutgoingQueue();
 
     // Sync channel names on startup
     await this.syncChannelMetadata();
+  }
+
+  private setupSocketMonitor(): void {
+    // Access the underlying SocketModeClient via Bolt's internal receiver.
+    // The client is an EventEmitter that emits 'connected', 'reconnecting', 'disconnected'.
+    const receiver = this.app as unknown as {
+      receiver?: { client?: { on: (event: string, cb: () => void) => void } };
+    };
+    const smClient = receiver.receiver?.client;
+    if (!smClient) return;
+
+    smClient.on('disconnected', () => {
+      logger.warn('Slack socket disconnected — will attempt reconnect');
+      this.connected = false;
+      this.scheduleReconnect();
+    });
+
+    smClient.on('connected', () => {
+      if (this.reconnecting) {
+        logger.info('Slack socket reconnected');
+        this.connected = true;
+        this.reconnecting = false;
+        this.flushOutgoingQueue().catch(() => {});
+      }
+    });
+  }
+
+  private scheduleReconnect(): void {
+    if (this.reconnecting) return;
+    this.reconnecting = true;
+
+    const RECONNECT_DELAY_MS = 10_000;
+    logger.info(
+      { delayMs: RECONNECT_DELAY_MS },
+      'Scheduling Slack reconnect',
+    );
+
+    this.reconnectTimer = setTimeout(async () => {
+      try {
+        logger.info('Attempting Slack reconnect...');
+        await this.app.stop();
+        await this.app.start();
+        this.connected = true;
+        this.reconnecting = false;
+        logger.info('Slack reconnected successfully');
+        this.setupSocketMonitor();
+        await this.flushOutgoingQueue();
+      } catch (err) {
+        logger.error({ err }, 'Slack reconnect failed, retrying...');
+        this.reconnecting = false;
+        this.scheduleReconnect();
+      }
+    }, RECONNECT_DELAY_MS);
   }
 
   async sendMessage(jid: string, text: string): Promise<void> {
@@ -238,6 +299,11 @@ export class SlackChannel implements Channel {
 
   async disconnect(): Promise<void> {
     this.connected = false;
+    this.reconnecting = false;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
     await this.app.stop();
   }
 
