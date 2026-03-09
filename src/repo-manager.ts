@@ -75,20 +75,10 @@ function resolveMainWorkingTree(hostPath: string): string {
 }
 
 /**
- * Get the origin remote URL from a git repo.
- */
-async function getOriginUrl(repoRoot: string): Promise<string> {
-  const { stdout } = await execAsync('git remote get-url origin', {
-    cwd: repoRoot,
-  });
-  return stdout.trim();
-}
-
-/**
  * Prepare a local clone of a git repo for mounting into a container.
  *
- * - First run: clones from the repo's origin remote into data/repos/<group>/<name>/
- * - Subsequent runs: fetches origin, resets to origin/<branch>
+ * - First run: clones from the local repo path into data/repos/<group>/<name>/
+ * - Subsequent runs: fetches from local origin, resets to origin/<branch>
  *
  * The clone has a self-contained .git directory and works correctly inside
  * the container without any path tricks.
@@ -114,10 +104,13 @@ export async function prepareRepoClone(
       'Cloning repo for container mount',
     );
 
-    const originUrl = await getOriginUrl(repoRoot);
     fs.mkdirSync(cloneDir, { recursive: true });
 
-    await execAsync(`git clone "${originUrl}" "${cloneDir}"`);
+    // Clone from local path (not origin URL) to avoid SSH auth issues
+    // when running as a launchd/systemd service without access to ssh-agent.
+    // The clone still gets origin set to the local path; containers can
+    // fetch/push to the real remote if needed.
+    await execAsync(`git clone "${repoRoot}" "${cloneDir}"`);
     await execAsync(`git checkout "${branch}"`, { cwd: cloneDir });
 
     logger.info({ groupFolder, repoName, cloneDir }, 'Repo clone ready');
